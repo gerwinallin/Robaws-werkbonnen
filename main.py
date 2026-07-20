@@ -21,7 +21,7 @@ def main():
 
     # Sheet leegmaken voor het schone Sjon Koster overzicht
     worksheet.clear()
-    headers = ["Werkbon ID", "Nummer", "Datum", "Medewerker", "Uren Sjon Koster", "Status", "Omschrijving"]
+    headers = ["Werkbon ID", "Nummer", "Datum", "Verantwoordelijke", "Uren", "Status", "Titel / Omschrijving"]
     worksheet.append_row(headers)
 
     print("Werkbonnen ophalen uit Robaws (inclusief archief)...")
@@ -34,18 +34,18 @@ def main():
 
     data = response.json()
     
-    # Zoek flexibel naar de lijst (Robaws v2 gebruikt 'items')
+    # Veilig de lijst met werkbonnen uit de v2 API pakken
     werkbonnen = []
-    if isinstance(data, list):
+    if isinstance(data, dict):
+        if "items" in data:
+            werkbonnen = data["items"]
+        elif "data" in data:
+            werkbonnen = data["data"]
+    elif isinstance(data, list):
         werkbonnen = data
-    elif isinstance(data, dict):
-        for sleutel in ["items", "data", "results", "content"]:
-            if sleutel in data and isinstance(data[sleutel], list):
-                werkbonnen = data[sleutel]
-                break
 
     if not werkbonnen:
-        print("Geen werkbonnen gevonden in de Robaws API response.")
+        print("Geen werkbonnen gevonden in de Robaws API.")
         return
 
     sjon_rijen = []
@@ -54,57 +54,34 @@ def main():
         if not isinstance(bon, dict):
             continue
             
-        # FILTER: Alleen vanaf 1 juli 2026
+        # FILTER 1: Alleen werkbonnen vanaf 1 juli 2026
         bon_date = bon.get("date", "")
         if not bon_date or bon_date < "2026-07-01":
             continue
 
+        # FILTER 2: Kijken of Sjon Koster de 'Verantwoordelijke' (employee) is
         is_van_sjon = False
-        totaal_uren_sjon = 0.0
+        verantwoordelijke_info = bon.get("employee")
+        
+        if isinstance(verantwoordelijke_info, dict):
+            first = verantwoordelijke_info.get("firstName", "") or ""
+            last = verantwoordelijke_info.get("lastName", "") or ""
+            full = verantwoordelijke_info.get("name", "") or ""
+            
+            naam_totaal = f"{first} {last} {full}".lower()
+            if "sjon" in naam_totaal or "koster" in naam_totaal:
+                is_van_sjon = True
 
-        # 1. Check de medewerkers die aan de bon gekoppeld zijn
-        for key in ["employee", "assignedTo", "employees", "workers"]:
-            val = bon.get(key)
-            if isinstance(val, dict):
-                name = val.get("name", "") or val.get("firstName", "")
-                if "sjon" in name.lower() or "koster" in name.lower():
-                    is_van_sjon = True
-            elif isinstance(val, list):
-                for emp in val:
-                    if isinstance(emp, dict):
-                        name = emp.get("name", "") or emp.get("firstName", "")
-                        if "sjon" in name.lower() or "koster" in name.lower():
-                            is_van_sjon = True
-
-        # 2. Check de urenregistraties binnen de bon
-        uren_lijst = bon.get("hourRegistrations", []) or bon.get("hours", []) or bon.get("timeRegistrations", [])
-        if isinstance(uren_lijst, list):
-            for registratie in uren_lijst:
-                reg_employee = registratie.get("employee", {})
-                reg_name = ""
-                if isinstance(reg_employee, dict):
-                    reg_name = reg_employee.get("name", "") or reg_employee.get("firstName", "")
-                elif isinstance(reg_employee, str):
-                    reg_name = reg_employee
-
-                if "sjon" in reg_name.lower() or "koster" in reg_name.lower():
-                    is_van_sjon = True
-                    aantal_uren = registratie.get("hours") or registratie.get("duration") or registratie.get("quantity") or 0
-                    try:
-                        totaal_uren_sjon += float(aantal_uren)
-                    except (ValueError, TypeError):
-                        pass
-
-        # Als Sjon uren heeft of gekoppeld is, en er zijn uren bekend op de bon
+        # Als Sjon de verantwoordelijke is, voegen we de bon toe
         if is_van_sjon:
-            # Als er via de regels geen uren kwamen, pak dan de hoofdhon-uren
-            if totaal_uren_sjon == 0.0:
-                hoofd_uren = bon.get("hours") or bon.get("totalHours") or 0
-                try:
-                    totaal_uren_sjon = float(hoofd_uren)
-                except (ValueError, TypeError):
-                    pass
+            # Uren ophalen uit de hoofdgegevens van de bon
+            uren = bon.get("hours") or bon.get("totalHours") or 0.0
+            try:
+                uren = float(uren)
+            except (ValueError, TypeError):
+                uren = 0.0
 
+            # Status netjes tekstueel maken
             status = bon.get("status", "")
             if isinstance(status, dict):
                 status = status.get("name", "") or status.get("label", "")
@@ -112,7 +89,7 @@ def main():
             if bon.get("archived") or bon.get("isArchived"):
                 status = f"{status} (Gearchiveerd)"
 
-            # Pak nummer en titel (omschrijving) flexibel mee
+            # Nummer en Titel ophalen
             bon_number = bon.get("number") or bon.get("code") or ""
             bon_title = bon.get("title") or bon.get("description") or ""
 
@@ -121,18 +98,20 @@ def main():
                 bon_number,
                 bon_date,
                 "Sjon Koster",
-                totaal_uren_sjon,
+                uren,
                 status,
                 bon_title
             ]
             sjon_rijen.append(rij)
 
-    # Wegschrijven naar Google Sheets
+    # Alles wegschrijven naar Google Sheets
     if sjon_rijen:
+        # Sorteer netjes op datum
+        sjon_rijen.sort(key=lambda x: x[2])
         worksheet.append_rows(sjon_rijen)
-        print(f"Succes! {len(sjon_rijen)} werkbonnen vanaf 1 juli toegevoegd.")
+        print(f"Succes! {len(sjon_rijen)} werkbonnen van verantwoordelijke Sjon Koster toegevoegd.")
     else:
-        print("Geen werkbonnen gevonden voor Sjon Koster vanaf 1 juli.")
+        print("Geen werkbonnen gevonden waar Sjon Koster verantwoordelijk voor is vanaf 1 juli.")
 
 if __name__ == "__main__":
     main()
