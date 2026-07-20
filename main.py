@@ -1,15 +1,17 @@
 import os
 import requests
 import gspread
+from requests.auth import HTTPBasicAuth
 
 def main():
-    robaws_api_key = os.environ.get("ROBAWS_API_KEY")
+    robaws_key = os.environ.get("ROBAWS_API_KEY")
+    robaws_secret = os.environ.get("ROBAWS_SECRET")
     sheet_id = os.environ.get("SHEET_ID")
-    sheet_name = os.environ.get("SHEET_NAME", "Blad1")  # Verander naar je tabbladnaam indien nodig
+    sheet_name = os.environ.get("SHEET_NAME", "Blad1")
     credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
-    if not robaws_api_key or not sheet_id:
-        print("Fout: ROBAWS_API_KEY of SHEET_ID ontbreekt.")
+    if not robaws_key or not robaws_secret or not sheet_id:
+        print("Fout: Robaws inloggegevens of SHEET_ID ontbreekt.")
         return
 
     print("Verbinden met Google Sheets...")
@@ -24,12 +26,10 @@ def main():
 
     print("Werkbonnen ophalen uit Robaws...")
     robaws_url = "https://app.robaws.com/api/v2/work-orders" 
-    headers = {
-        "Authorization": f"Bearer {robaws_api_key}",
-        "Accept": "application/json"
-    }
 
-    response = requests.get(robaws_url, headers=headers)
+    # We loggen nu in met de Key en het Secret samen via HTTPBasicAuth
+    response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
+    
     if response.status_code != 200:
         print(f"Fout bij Robaws API: {response.status_code} - {response.text}")
         return
