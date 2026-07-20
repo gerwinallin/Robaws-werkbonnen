@@ -1,7 +1,6 @@
 import os
 import requests
 import gspread
-import json
 from requests.auth import HTTPBasicAuth
 
 def main():
@@ -12,7 +11,7 @@ def main():
     credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
     if not robaws_key or not robaws_secret or not sheet_id:
-        print("Fout: Robaws inloggegevens of SHEET_ID ontbreekt.")
+        print("Fout: Robaws inloggegevens of SHEET_ID ontbreeken.")
         return
 
     print("Verbinden met Google Sheets...")
@@ -20,12 +19,17 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
 
-    print("Werkbonnen ophalen uit Robaws...")
-    robaws_url = "https://app.robaws.com/api/v2/work-orders" 
+    # Sheet leegmaken voor het nieuwe overzicht
+    worksheet.clear()
+    headers = ["Werkbon ID", "Nummer", "Datum", "Medewerker", "Uren Sjon Koster", "Status", "Omschrijving"]
+    worksheet.append_row(headers)
+
+    print("Werkbonnen ophalen uit Robaws (inclusief archief)...")
+    robaws_url = "https://app.robaws.com/api/v2/work-orders?includeArchived=true" 
 
     response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
     if response.status_code != 200:
-        print(f"Fout bij Robaws API: {response.status_code}")
+        print(f"Fout bij Robaws API: {response.status_code} - {response.text}")
         return
 
     data = response.json()
@@ -35,37 +39,73 @@ def main():
         print("Geen werkbonnen gevonden.")
         return
 
-    # --- DIAGNOSTIEK: DIT PRINT DE INDELING IN JOUW LOGBOEK ---
-    print("\n--- DIAGNOSTIEK: EERSTE WERKBON STRUCTUUR ---")
-    print(json.dumps(werkbonnen[0], indent=2))
-    print("----------------------------------------------\n")
-    # ---------------------------------------------------------
-
-    bestaande_ids = worksheet.col_values(1)
-    nieuwe_rijen = []
+    sjon_rijen = []
 
     for bon in werkbonnen:
         if not isinstance(bon, dict):
             continue
-        bon_id = str(bon.get("id"))
-        if bon_id in bestaande_ids:
-            continue
             
-        rij = [
-            bon_id,
-            bon.get("number", ""),
-            bon.get("clientName", ""),
-            bon.get("date", ""),
-            bon.get("status", ""),
-            bon.get("description", "")
-        ]
-        nieuwe_rijen.append(rij)
+        # FILTER: Sla bonnen over die vóór 1 juli 2026 zijn aangemaakt
+        bon_date = bon.get("date", "")
+        if not bon_date or bon_date < "2026-07-01":
+            continue
 
-    if nieuwe_rijen:
-        worksheet.append_rows(nieuwe_rijen)
-        print(f"Succes! {len(nieuwe_rijen)} nieuwe werkbonnen toegevoegd.")
+        is_van_sjon = False
+        totaal_uren_sjon = 0.0
+
+        # 1. Check hoofdverantwoordelijke
+        employee_info = bon.get("employee", {}) or bon.get("assignedTo", {})
+        employee_name = ""
+        if isinstance(employee_info, dict):
+            employee_name = employee_info.get("name", "") or employee_info.get("firstName", "")
+        elif isinstance(employee_info, str):
+            employee_name = employee_info
+
+        if "sjon" in employee_name.lower() or "koster" in employee_name.lower():
+            is_van_sjon = True
+
+        # 2. Check urenregistraties binnen de bon
+        uren_lijst = bon.get("hourRegistrations", []) or bon.get("hours", []) or bon.get("timeRegistrations", [])
+        
+        if isinstance(uren_lijst, list):
+            for registratie in uren_lijst:
+                reg_employee = registratie.get("employee", {})
+                reg_name = ""
+                if isinstance(reg_employee, dict):
+                    reg_name = reg_employee.get("name", "") or reg_employee.get("firstName", "")
+                elif isinstance(reg_employee, str):
+                    reg_name = reg_employee
+
+                if "sjon" in reg_name.lower() or "koster" in reg_name.lower():
+                    is_van_sjon = True
+                    aantal_uren = registratie.get("hours") or registratie.get("duration") or registratie.get("quantity") or 0
+                    try:
+                        totaal_uren_sjon += float(aantal_uren)
+                    except (ValueError, TypeError):
+                        pass
+
+        if is_van_sjon:
+            status = bon.get("status", "")
+            if bon.get("archived") or bon.get("isArchived"):
+                status = f"{status} (Gearchiveerd)"
+
+            rij = [
+                str(bon.get("id")),
+                bon.get("number", ""),
+                bon_date,
+                "Sjon Koster",
+                totaal_uren_sjon,
+                status,
+                bon.get("description", "")
+            ]
+            sjon_rijen.append(rij)
+
+    # Wegschrijven naar Google Sheets
+    if sjon_rijen:
+        worksheet.append_rows(sjon_rijen)
+        print(f"Succes! {len(sjon_rijen)} werkbonnen van Sjon Koster vanaf 1 juli toegevoegd.")
     else:
-        print("Alles is al up-to-date.")
+        print("Geen werkbonnen of urenregistraties gevonden voor Sjon Koster vanaf 1 juli.")
 
 if __name__ == "__main__":
     main()
