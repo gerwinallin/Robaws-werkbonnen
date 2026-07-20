@@ -19,22 +19,22 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
 
-    # Sheet volledig leegmaken voor het nieuwe gedetailleerde urenoverzicht
+    # Sheet volledig schoonmaken voor het nieuwe urenoverzicht
     worksheet.clear()
     headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving"]
     worksheet.append_row(headers)
 
-    print("Werkbonnen ophalen uit Robaws (alle pagina's)...")
+    print("Werkbonnen ophalen uit Robaws...")
     
     all_werkbonnen = []
-    for page in range(1, 50):
+    seen_ids = set()
+    
+    # We lopen door de pagina's heen. Als een pagina geen nieuwe bonnen oplevert, stopt de loop direct.
+    for page in range(1, 30):
         robaws_url = f"https://app.robaws.com/api/v2/work-orders?includeArchived=true&page={page}&limit=100"
         response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
         
         if response.status_code != 200:
-            if page == 1:
-                print(f"Fout bij Robaws API: {response.status_code} - {response.text}")
-                return
             break
             
         data = response.json()
@@ -43,10 +43,22 @@ def main():
         if not items:
             break
             
-        all_werkbonnen.extend(items)
-        print(f"Pagina {page} ingeladen ({len(items)} bonnen)...")
+        # Controleer of deze pagina nieuwe bonnen bevat om herhalingen te voorkomen
+        new_items_found = False
+        for item in items:
+            if isinstance(item, dict):
+                bon_id = item.get("id")
+                if bon_id not in seen_ids:
+                    all_werkbonnen.append(item)
+                    seen_ids.add(bon_id)
+                    new_items_found = True
+                    
+        # Als Robaws ons dezelfde pagina blijft sturen (geen nieuwe ID's gevonden), breken we de loop
+        if not new_items_found:
+            print(f"Paginering gestopt op pagina {page} (geen nieuwe unieke bonnen meer).")
+            break
 
-    print(f"Totaal {len(all_werkbonnen)} bonnen ingeladen. Filteren op datum en 'Onderhoudsbeurt'...")
+    print(f"Totaal {len(all_werkbonnen)} unieke bonnen ingeladen. Filteren op datum vanaf 1 juli 2026 en 'Onderhoudsbeurt'...")
 
     uren_rijen = []
 
@@ -54,7 +66,7 @@ def main():
         if not isinstance(bon, dict):
             continue
             
-        # FILTER 1: Alleen vanaf 1 juli 2026
+        # FILTER 1: Alleen werkbonnen vanaf 1 juli 2026
         bon_date = bon.get("date", "")
         if not bon_date or bon_date < "2026-07-01":
             continue
@@ -64,7 +76,7 @@ def main():
         if "onderhoudsbeurt" in bon_title.lower():
             bon_id = str(bon.get("id", ""))
             
-            # Haal de diepe details van deze specifieke werkbon op om de urenregels te lezen
+            # Haal de diepe details van deze specifieke werkbon op om de timeEntries te kunnen lezen
             detail_url = f"https://app.robaws.com/api/v2/work-orders/{bon_id}"
             detail_response = requests.get(detail_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
             
@@ -73,7 +85,6 @@ def main():
             else:
                 bon_detail = bon
 
-            # Metadata van de bon ophalen
             bon_number = bon_detail.get("number") or bon_detail.get("code") or ""
             bon_title_def = bon_detail.get("title") or bon_detail.get("description") or ""
             
@@ -84,38 +95,41 @@ def main():
                 if "gearchiveerd" not in str(status).lower():
                     status = f"{status} (Gearchiveerd)"
 
-            # Haal de lijst met geschreven uren op uit de bon
-            uren_lijst = bon_detail.get("hourRegistrations", []) or bon_detail.get("hours", []) or bon_detail.get("timeRegistrations", [])
+            # Haal de urenregistraties (timeEntries) op uit de bon op basis van de documentatie
+            uren_lijst = bon_detail.get("timeEntries") or bon_detail.get("hourRegistrations") or bon_detail.get("timeRegistrations") or []
             
             if isinstance(uren_lijst, list) and uren_lijst:
-                # Loop door elke losse urenregel heen (zoals de 3 regels van Sjon Koster)
                 for reg in uren_lijst:
                     if not isinstance(reg, dict):
                         continue
                         
-                    # 1. Werknemer van deze specifieke regel achterhalen
-                    emp_info = reg.get("employee", {})
+                    # 1. Werknemer naam achterhalen
                     werknemer_naam = "Onbekend"
+                    emp_info = reg.get("employee") or reg.get("worker") or reg.get("user")
                     if isinstance(emp_info, dict):
-                        first = emp_info.get("firstName", "")
-                        last = emp_info.get("lastName", "")
-                        full = emp_info.get("name", "")
-                        werknemer_naam = f"{first} {last} {full}".strip() or "Onbekend"
-                        werknemer_naam = " ".join(werknemer_naam.split())
+                        first = emp_info.get("firstName", "") or ""
+                        last = emp_info.get("lastName", "") or ""
+                        full = emp_info.get("name", "") or ""
+                        werknemer_naam = f"{first} {last} {full}".strip()
                     elif isinstance(emp_info, str):
                         werknemer_naam = emp_info
+                        
+                    if not werknemer_naam or werknemer_naam == "Onbekend":
+                        # Fallback op ID of naamvelden direct in de regel als het object niet is uitgeklapt
+                        werknemer_naam = reg.get("employeeName") or reg.get("employeeId") or "Onbekend"
+                    
+                    werknemer_naam = " ".join(werknemer_naam.split())
 
-                    # 2. Aantal uren van deze regel
+                    # 2. Aantal uren uitlezen (exact conform 'hours' uit jouw documentatie)
                     aantal_uren = reg.get("hours") or reg.get("duration") or reg.get("quantity") or 0.0
                     try:
                         aantal_uren = float(aantal_uren)
                     except (ValueError, TypeError):
                         aantal_uren = 0.0
 
-                    # 3. Wat heeft de werknemer ingevuld in de bon (Opmerkingen / Activiteit)
-                    opmerking = reg.get("comment") or reg.get("description") or reg.get("remarks") or reg.get("activity", "") or ""
+                    # 3. Opmerking van de werknemer uitlezen (exact conform 'remark' uit jouw documentatie)
+                    opmerking = reg.get("remark") or reg.get("comment") or reg.get("description") or ""
 
-                    # Maak een rij voor deze specifieke tijdregistratie
                     rij = [
                         bon_id,
                         bon_number,
@@ -128,12 +142,12 @@ def main():
                     ]
                     uren_rijen.append(rij)
             else:
-                # Als de bon wel bestaat maar er zijn nog helemaal geen uren op geschreven
+                # Als er wel een bon is maar (nog) geen urenregels onder timeEntries staan
                 rij = [
                     bon_id,
                     bon_number,
                     bon_date,
-                    "Geen uren geschreven",
+                    "Geen uren geregistreerd",
                     0.0,
                     "",
                     status,
@@ -141,14 +155,14 @@ def main():
                 ]
                 uren_rijen.append(rij)
 
-    # Schrijf alle regels weg naar Google Sheets
+    # Schrijf de gefilterde urenregels weg naar Google Sheets
     if uren_rijen:
-        # Sorteer netjes op datum van de bon
+        # Sorteer de lijst netjes chronologisch op datum
         uren_rijen.sort(key=lambda x: x[2])
         worksheet.append_rows(uren_rijen)
-        print(f"Succes! {len(uren_rijen)} urenregels uit onderhoudsbeurten toegevoegd.")
+        print(f"Succes! {len(uren_rijen)} urenregels uit de onderhoudsbeurten toegevoegd aan de sheet.")
     else:
-        print("Geen onderhoudsbeurten gevonden vanaf 1 juli.")
+        print("Geen onderhoudsbeurten gevonden vanaf 1 juli 2026.")
 
 if __name__ == "__main__":
     main()
