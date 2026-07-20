@@ -19,27 +19,43 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
 
-    # Sheet volledig schoonmaken voor het nieuwe urenoverzicht
+    # Sheet volledig schoonmaken voor het complete overzicht
     worksheet.clear()
     headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving"]
     worksheet.append_row(headers)
 
-    print("Werkbonnen ophalen uit Robaws...")
+    print("Werkbonnen ophalen uit Robaws (inclusief gearchiveerde bonnen via JSON:API)...")
     
     all_werkbonnen = []
     seen_ids = set()
     
-    for page in range(1, 30):
-        robaws_url = f"https://app.robaws.com/api/v2/work-orders?includeArchived=true&page={page}&limit=100"
-        response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
+    # We lopen door de pagina's heen met de juiste JSON:API parameters
+    for page in range(1, 20):
+        robaws_url = "https://app.robaws.com/api/v2/work-orders"
+        
+        # We sturen alle mogelijke varianten mee zodat Robaws de paginering en het archief MOET activeren
+        params = {
+            "includeArchived": "true",
+            "archived": "true",
+            "filter[archived]": "true",
+            "page": page,
+            "page[number]": page,
+            "limit": 100,
+            "page[size]": 100,
+            "sort": "-date"  # Zorgt dat de nieuwste bonnen vanaf 1 juli direct bovenaan staan
+        }
+        
+        response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret), params=params)
         
         if response.status_code != 200:
+            print(f"Stop op pagina {page} wegens statuscode {response.status_code}")
             break
             
         data = response.json()
         items = data.get("items", data.get("data", [])) if isinstance(data, dict) else data
             
         if not items:
+            print(f"Geen bonnen meer gevonden op pagina {page}.")
             break
             
         new_items_found = False
@@ -51,10 +67,13 @@ def main():
                     seen_ids.add(bon_id)
                     new_items_found = True
                     
+        print(f"Pagina {page} succesvol verwerkt. Unieke bonnen tot nu toe: {len(all_werkbonnen)}")
+        
+        # Als er geen nieuwe bonnen op deze pagina stonden, zijn we aan het einde van de lijst
         if not new_items_found:
             break
 
-    print(f"Totaal {len(all_werkbonnen)} unieke bonnen ingeladen. Filteren en uren ophalen per bon...")
+    print(f"\nFilteren van {len(all_werkbonnen)} bonnen op datum vanaf 1 juli 2026 en 'Onderhoudsbeurt'...")
 
     uren_rijen = []
 
@@ -80,7 +99,7 @@ def main():
                 if "gearchiveerd" not in str(status).lower():
                     status = f"{status} (Gearchiveerd)"
 
-            # EXTRACTIE: Ophalen van de losse urenregels (time-entries) via de specifieke endpoint
+            # Diepe urenregistraties ophalen per gevonden onderhoudsbon
             time_entries_url = f"https://app.robaws.com/api/v2/work-orders/{bon_id}/time-entries"
             te_response = requests.get(time_entries_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
             
@@ -94,7 +113,7 @@ def main():
                     if not isinstance(reg, dict):
                         continue
                         
-                    # 1. Werknemer naam achterhalen
+                    # Werknemer naam
                     werknemer_naam = "Onbekend"
                     emp_info = reg.get("employee") or reg.get("worker")
                     if isinstance(emp_info, dict):
@@ -110,28 +129,28 @@ def main():
                     
                     werknemer_naam = " ".join(werknemer_naam.split())
 
-                    # 2. Aantal uren uitlezen (exact conform 'hours' uit documentatie)
+                    # Aantal uren (conform 'hours')
                     aantal_uren = reg.get("hours") or reg.get("duration") or 0.0
                     try:
                         aantal_uren = float(aantal_uren)
                     except (ValueError, TypeError):
                         aantal_uren = 0.0
 
-                    # 3. Opmerking van de werknemer (exact conform 'remark' uit documentatie)
+                    # Opmerking werknemer (conform 'remark')
                     opmerking = reg.get("remark") or reg.get("comment") or ""
 
                     rij = [bon_id, bon_number, bon_date, werknemer_naam, aantal_uren, opmerking, status, bon_title]
                     uren_rijen.append(rij)
             else:
-                # Als er in de time-entries endpoint (nog) geen uren staan
+                # Mocht er een bon zijn zonder geregistreerde urenregels
                 rij = [bon_id, bon_number, bon_date, "Geen uren geregistreerd", 0.0, "", status, bon_title]
                 uren_rijen.append(rij)
 
-    # Schrijf alles weg naar Google Sheets
+    # Schrijf alle regels chronologisch weg naar Google Sheets
     if uren_rijen:
         uren_rijen.sort(key=lambda x: x[2])
         worksheet.append_rows(uren_rijen)
-        print(f"Succes! {len(uren_rijen)} urenregels toegevoegd.")
+        print(f"Succes! {len(uren_rijen)} urenregels uit actieve en gearchiveerde onderhoudsbeurten toegevoegd.")
     else:
         print("Geen onderhoudsbeurten gevonden vanaf 1 juli 2026.")
 
