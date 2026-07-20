@@ -32,6 +32,7 @@ jobs:
       - name: Run sync script
         env:
           ROBAWS_API_KEY: ${{ secrets.ROBAWS_API_KEY }}
+          ROBAWS_SECRET: ${{ secrets.ROBAWS_SECRET }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_NAME: "Blad1"
           GOOGLE_APPLICATION_CREDENTIALS: "credentials.json"
