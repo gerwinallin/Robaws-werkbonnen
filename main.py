@@ -1,6 +1,7 @@
 import os
 import requests
 import gspread
+import json
 from requests.auth import HTTPBasicAuth
 
 def main():
@@ -17,61 +18,43 @@ def main():
     print("Verbinden met Google Sheets...")
     gc = gspread.service_account(filename=credentials_file)
     sh = gc.open_by_key(sheet_id)
-    
-    try:
-        worksheet = sh.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="10")
-        worksheet.append_row(["ID", "Nummer", "Klant", "Datum", "Status", "Omschrijving"])
+    worksheet = sh.worksheet(sheet_name)
 
     print("Werkbonnen ophalen uit Robaws...")
     robaws_url = "https://app.robaws.com/api/v2/work-orders" 
 
     response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
-    
     if response.status_code != 200:
-        print(f"Fout bij Robaws API: {response.status_code} - {response.text}")
+        print(f"Fout bij Robaws API: {response.status_code}")
         return
 
     data = response.json()
-    
-    # Zoek flexibel naar de lijst met werkbonnen in de Robaws data
-    werkbonnen = []
-    if isinstance(data, list):
-        werkbonnen = data
-    elif isinstance(data, dict):
-        for sleutel in ["data", "items", "results", "content"]:
-            if sleutel in data and isinstance(data[sleutel], list):
-                werkbonnen = data[sleutel]
-                break
-        else:
-            # Als er geen lijst wordt gevonden, printen we de structuur voor hulp
-            print("Fout: Kon geen lijst met werkbonnen vinden in de Robaws data.")
-            print(f"Beschikbare velden in de reactie: {list(data.keys())}")
-            print(f"Inhoud van de reactie (eerste 300 tekens): {str(data)[:300]}")
-            return
+    werkbonnen = data.get("data", data) if isinstance(data, dict) else data
 
-    if not werkbonnen:
-        print("Geen werkbonnen gevonden of de lijst is leeg.")
+    if not werkbonnen or not isinstance(werkbonnen, list):
+        print("Geen werkbonnen gevonden.")
         return
+
+    # --- DIAGNOSTIEK: DIT PRINT DE INDELING IN JOUW LOGBOEK ---
+    print("\n--- DIAGNOSTIEK: EERSTE WERKBON STRUCTUUR ---")
+    print(json.dumps(werkbonnen[0], indent=2))
+    print("----------------------------------------------\n")
+    # ---------------------------------------------------------
 
     bestaande_ids = worksheet.col_values(1)
     nieuwe_rijen = []
 
     for bon in werkbonnen:
-        # Extra controle of 'bon' wel echt een object/dictionary is
         if not isinstance(bon, dict):
             continue
-            
         bon_id = str(bon.get("id"))
-        
         if bon_id in bestaande_ids:
             continue
             
         rij = [
             bon_id,
             bon.get("number", ""),
-            bon.get("clientName", "") or bon.get("customer", {}).get("name", ""),
+            bon.get("clientName", ""),
             bon.get("date", ""),
             bon.get("status", ""),
             bon.get("description", "")
