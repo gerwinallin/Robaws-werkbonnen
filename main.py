@@ -19,38 +19,44 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
 
-    # Sheet leegmaken voor het schone Sjon Koster overzicht
+    # Sheet leegmaken voor het schone overzicht
     worksheet.clear()
     headers = ["Werkbon ID", "Nummer", "Datum", "Verantwoordelijke", "Uren", "Status", "Titel / Omschrijving"]
     worksheet.append_row(headers)
 
-    print("Werkbonnen ophalen uit Robaws (inclusief archief)...")
-    robaws_url = "https://app.robaws.com/api/v2/work-orders?includeArchived=true" 
-
-    response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
-    if response.status_code != 200:
-        print(f"Fout bij Robaws API: {response.status_code} - {response.text}")
-        return
-
-    data = response.json()
+    print("Werkbonnen ophalen uit Robaws (alle pagina's)...")
     
-    # Veilig de lijst met werkbonnen uit de v2 API pakken
-    werkbonnen = []
-    if isinstance(data, dict):
-        if "items" in data:
-            werkbonnen = data["items"]
-        elif "data" in data:
-            werkbonnen = data["data"]
-    elif isinstance(data, list):
-        werkbonnen = data
+    all_werkbonnen = []
+    # We lopen door meerdere pagina's heen om alle bonnen op te halen
+    for page in range(1, 11):
+        robaws_url = f"https://app.robaws.com/api/v2/work-orders?includeArchived=true&page={page}&limit=100"
+        response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
+        
+        if response.status_code != 200:
+            if page == 1:
+                print(f"Fout bij Robaws API: {response.status_code} - {response.text}")
+                return
+            break
+            
+        data = response.json()
+        items = []
+        if isinstance(data, dict):
+            items = data.get("items", data.get("data", []))
+        elif isinstance(data, list):
+            items = data
+            
+        if not items:
+            break
+            
+        all_werkbonnen.extend(items)
+        if len(items) < 100:
+            break
 
-    if not werkbonnen:
-        print("Geen werkbonnen gevonden in de Robaws API.")
-        return
+    print(f"Totaal {len(all_werkbonnen)} bonnen ingeladen. Nu filteren op 'Onderhoudsbeurt'...")
 
-    sjon_rijen = []
+    geselecteerde_rijen = []
 
-    for bon in werkbonnen:
+    for bon in all_werkbonnen:
         if not isinstance(bon, dict):
             continue
             
@@ -59,59 +65,65 @@ def main():
         if not bon_date or bon_date < "2026-07-01":
             continue
 
-        # FILTER 2: Kijken of Sjon Koster de 'Verantwoordelijke' (employee) is
-        is_van_sjon = False
-        verantwoordelijke_info = bon.get("employee")
-        
-        if isinstance(verantwoordelijke_info, dict):
-            first = verantwoordelijke_info.get("firstName", "") or ""
-            last = verantwoordelijke_info.get("lastName", "") or ""
-            full = verantwoordelijke_info.get("name", "") or ""
-            
-            naam_totaal = f"{first} {last} {full}".lower()
-            if "sjon" in naam_totaal or "koster" in naam_totaal:
-                is_van_sjon = True
+        # Pak de titel of omschrijving van de bon
+        bon_title = bon.get("title") or bon.get("description") or ""
 
-        # Als Sjon de verantwoordelijke is, voegen we de bon toe
-        if is_van_sjon:
-            # Uren ophalen uit de hoofdgegevens van de bon
+        # FILTER 2: Het woord 'Onderhoudsbeurt' moet in de titel staan
+        if "onderhoudsbeurt" in bon_title.lower():
+            
+            # Haal de naam van de verantwoordelijke (employee) dynamisch op
+            verantwoordelijke = "Onbekend"
+            verantwoordelijke_info = bon.get("employee") or bon.get("responsibleEmployee")
+            if isinstance(verantwoordelijke_info, dict):
+                first = verantwoordelijke_info.get("firstName", "")
+                last = verantwoordelijke_info.get("lastName", "")
+                full = verantwoordelijke_info.get("name", "")
+                # Voeg naamdelen samen en haal dubbele spaties weg
+                naam_totaal = f"{first} {last} {full}".strip()
+                if naam_totaal:
+                    verantwoordelijke = " ".join(naam_totaal.split())
+            elif isinstance(verantwoordelijke_info, str):
+                verantwoordelijke = verantwoordelijke_info
+
+            # Uren flexibel uitlezen
             uren = bon.get("hours") or bon.get("totalHours") or 0.0
+            if isinstance(uren, (dict, list)):
+                uren = 0.0
             try:
                 uren = float(uren)
             except (ValueError, TypeError):
                 uren = 0.0
 
-            # Status netjes tekstueel maken
+            # Status flexibel uitlezen
             status = bon.get("status", "")
             if isinstance(status, dict):
-                status = status.get("name", "") or status.get("label", "")
+                status = status.get("name") or status.get("label") or str(status)
                 
             if bon.get("archived") or bon.get("isArchived"):
-                status = f"{status} (Gearchiveerd)"
+                if "gearchiveerd" not in str(status).lower():
+                    status = f"{status} (Gearchiveerd)"
 
-            # Nummer en Titel ophalen
             bon_number = bon.get("number") or bon.get("code") or ""
-            bon_title = bon.get("title") or bon.get("description") or ""
 
             rij = [
-                str(bon.get("id")),
+                str(bon.get("id", "")),
                 bon_number,
                 bon_date,
-                "Sjon Koster",
+                verantwoordelijke,
                 uren,
                 status,
                 bon_title
             ]
-            sjon_rijen.append(rij)
+            geselecteerde_rijen.append(rij)
 
     # Alles wegschrijven naar Google Sheets
-    if sjon_rijen:
+    if geselecteerde_rijen:
         # Sorteer netjes op datum
-        sjon_rijen.sort(key=lambda x: x[2])
-        worksheet.append_rows(sjon_rijen)
-        print(f"Succes! {len(sjon_rijen)} werkbonnen van verantwoordelijke Sjon Koster toegevoegd.")
+        geselecteerde_rijen.sort(key=lambda x: x[2])
+        worksheet.append_rows(geselecteerde_rijen)
+        print(f"Succes! {len(geselecteerde_rijen)} onderhoudsbeurten vanaf 1 juli toegevoegd.")
     else:
-        print("Geen werkbonnen gevonden waar Sjon Koster verantwoordelijk voor is vanaf 1 juli.")
+        print("Geen werkbonnen gevonden met 'Onderhoudsbeurt' in de titel vanaf 1 juli.")
 
 if __name__ == "__main__":
     main()
