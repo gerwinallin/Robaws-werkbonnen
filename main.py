@@ -27,7 +27,6 @@ def main():
     print("Werkbonnen ophalen uit Robaws...")
     robaws_url = "https://app.robaws.com/api/v2/work-orders" 
 
-    # We loggen nu in met de Key en het Secret samen via HTTPBasicAuth
     response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
     
     if response.status_code != 200:
@@ -35,16 +34,35 @@ def main():
         return
 
     data = response.json()
-    werkbonnen = data.get("data", data) if isinstance(data, dict) else data
+    
+    # Zoek flexibel naar de lijst met werkbonnen in de Robaws data
+    werkbonnen = []
+    if isinstance(data, list):
+        werkbonnen = data
+    elif isinstance(data, dict):
+        for sleutel in ["data", "items", "results", "content"]:
+            if sleutel in data and isinstance(data[sleutel], list):
+                werkbonnen = data[sleutel]
+                break
+        else:
+            # Als er geen lijst wordt gevonden, printen we de structuur voor hulp
+            print("Fout: Kon geen lijst met werkbonnen vinden in de Robaws data.")
+            print(f"Beschikbare velden in de reactie: {list(data.keys())}")
+            print(f"Inhoud van de reactie (eerste 300 tekens): {str(data)[:300]}")
+            return
 
     if not werkbonnen:
-        print("Geen werkbonnen gevonden.")
+        print("Geen werkbonnen gevonden of de lijst is leeg.")
         return
 
     bestaande_ids = worksheet.col_values(1)
     nieuwe_rijen = []
 
     for bon in werkbonnen:
+        # Extra controle of 'bon' wel echt een object/dictionary is
+        if not isinstance(bon, dict):
+            continue
+            
         bon_id = str(bon.get("id"))
         
         if bon_id in bestaande_ids:
