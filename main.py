@@ -11,7 +11,7 @@ def main():
     credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
     if not robaws_key or not robaws_secret or not sheet_id:
-        print("Fout: Robaws inloggegevens of SHEET_ID ontbreeken.")
+        print("Fout: Robaws inloggegevens of SHEET_ID ontbreekt.")
         return
 
     print("Verbinden met Google Sheets...")
@@ -19,7 +19,7 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
 
-    # Sheet leegmaken voor het nieuwe overzicht
+    # Sheet leegmaken voor het schone Sjon Koster overzicht
     worksheet.clear()
     headers = ["Werkbon ID", "Nummer", "Datum", "Medewerker", "Uren Sjon Koster", "Status", "Omschrijving"]
     worksheet.append_row(headers)
@@ -33,10 +33,19 @@ def main():
         return
 
     data = response.json()
-    werkbonnen = data.get("data", data) if isinstance(data, dict) else data
+    
+    # Zoek flexibel naar de lijst (Robaws v2 gebruikt 'items')
+    werkbonnen = []
+    if isinstance(data, list):
+        werkbonnen = data
+    elif isinstance(data, dict):
+        for sleutel in ["items", "data", "results", "content"]:
+            if sleutel in data and isinstance(data[sleutel], list):
+                werkbonnen = data[sleutel]
+                break
 
-    if not werkbonnen or not isinstance(werkbonnen, list):
-        print("Geen werkbonnen gevonden.")
+    if not werkbonnen:
+        print("Geen werkbonnen gevonden in de Robaws API response.")
         return
 
     sjon_rijen = []
@@ -45,7 +54,7 @@ def main():
         if not isinstance(bon, dict):
             continue
             
-        # FILTER: Sla bonnen over die vóór 1 juli 2026 zijn aangemaakt
+        # FILTER: Alleen vanaf 1 juli 2026
         bon_date = bon.get("date", "")
         if not bon_date or bon_date < "2026-07-01":
             continue
@@ -53,20 +62,22 @@ def main():
         is_van_sjon = False
         totaal_uren_sjon = 0.0
 
-        # 1. Check hoofdverantwoordelijke
-        employee_info = bon.get("employee", {}) or bon.get("assignedTo", {})
-        employee_name = ""
-        if isinstance(employee_info, dict):
-            employee_name = employee_info.get("name", "") or employee_info.get("firstName", "")
-        elif isinstance(employee_info, str):
-            employee_name = employee_info
+        # 1. Check de medewerkers die aan de bon gekoppeld zijn
+        for key in ["employee", "assignedTo", "employees", "workers"]:
+            val = bon.get(key)
+            if isinstance(val, dict):
+                name = val.get("name", "") or val.get("firstName", "")
+                if "sjon" in name.lower() or "koster" in name.lower():
+                    is_van_sjon = True
+            elif isinstance(val, list):
+                for emp in val:
+                    if isinstance(emp, dict):
+                        name = emp.get("name", "") or emp.get("firstName", "")
+                        if "sjon" in name.lower() or "koster" in name.lower():
+                            is_van_sjon = True
 
-        if "sjon" in employee_name.lower() or "koster" in employee_name.lower():
-            is_van_sjon = True
-
-        # 2. Check urenregistraties binnen de bon
+        # 2. Check de urenregistraties binnen de bon
         uren_lijst = bon.get("hourRegistrations", []) or bon.get("hours", []) or bon.get("timeRegistrations", [])
-        
         if isinstance(uren_lijst, list):
             for registratie in uren_lijst:
                 reg_employee = registratie.get("employee", {})
@@ -84,28 +95,44 @@ def main():
                     except (ValueError, TypeError):
                         pass
 
+        # Als Sjon uren heeft of gekoppeld is, en er zijn uren bekend op de bon
         if is_van_sjon:
+            # Als er via de regels geen uren kwamen, pak dan de hoofdhon-uren
+            if totaal_uren_sjon == 0.0:
+                hoofd_uren = bon.get("hours") or bon.get("totalHours") or 0
+                try:
+                    totaal_uren_sjon = float(hoofd_uren)
+                except (ValueError, TypeError):
+                    pass
+
             status = bon.get("status", "")
+            if isinstance(status, dict):
+                status = status.get("name", "") or status.get("label", "")
+                
             if bon.get("archived") or bon.get("isArchived"):
                 status = f"{status} (Gearchiveerd)"
 
+            # Pak nummer en titel (omschrijving) flexibel mee
+            bon_number = bon.get("number") or bon.get("code") or ""
+            bon_title = bon.get("title") or bon.get("description") or ""
+
             rij = [
                 str(bon.get("id")),
-                bon.get("number", ""),
+                bon_number,
                 bon_date,
                 "Sjon Koster",
                 totaal_uren_sjon,
                 status,
-                bon.get("description", "")
+                bon_title
             ]
             sjon_rijen.append(rij)
 
     # Wegschrijven naar Google Sheets
     if sjon_rijen:
         worksheet.append_rows(sjon_rijen)
-        print(f"Succes! {len(sjon_rijen)} werkbonnen van Sjon Koster vanaf 1 juli toegevoegd.")
+        print(f"Succes! {len(sjon_rijen)} werkbonnen vanaf 1 juli toegevoegd.")
     else:
-        print("Geen werkbonnen of urenregistraties gevonden voor Sjon Koster vanaf 1 juli.")
+        print("Geen werkbonnen gevonden voor Sjon Koster vanaf 1 juli.")
 
 if __name__ == "__main__":
     main()
