@@ -15,84 +15,97 @@ def main():
         return
 
     auth = HTTPBasicAuth(robaws_key, robaws_secret)
+    gc = gspread.service_account(filename=credentials_file)
+    sh = gc.open_by_key(sheet_id)
+    worksheet = sh.worksheet(sheet_name)
 
-    print("=== STAP 1: WERKBONNEN VERZAMELEN & OPHALEN ===")
+    print("=== STAP 1: HUIDIGE HISTORIE IN GOOGLE SHEETS VEILIGSTELLEN ===")
+    try:
+        bestaande_data = worksheet.get_all_values()
+    except Exception:
+        bestaande_data = []
+
+    headers = bestaande_data[0] if bestaande_data else ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving", "Onderhoud"]
     
+    oude_rijen = []
+    if len(bestaande_data) > 1:
+        for rij in bestaande_data[1:]:
+            if len(rij) >= 3:
+                datum = rij[2]
+                # We bewaren de bonnen van vóór 1 juli, zodat historische data nooit verdwijnt
+                if datum < "2026-07-01":
+                    oude_rijen.append(rij)
+                    
+    print(f"{len(oude_rijen)} oude rijen (van vóór 1 juli) succesvol veiliggesteld.")
+
+    print("\n=== STAP 2: WERKBONNEN OPHALEN UIT ROBAWS (TOT 1 JULI) ===")
     all_found_work_orders = {}
 
-    def process_items(items):
-        added = 0
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict) and "id" in item:
-                    item_id = item["id"]
-                    if item_id not in all_found_work_orders:
-                        all_found_work_orders[item_id] = item
-                        added += 1
-        return added
+    # We lopen chronologisch terug in de tijd totdat we 1 juli passeren
+    for page in range(1, 50):
+        params = {
+            "includeArchived": "true",
+            "page": page,
+            "limit": 100,
+            "sort": "-date" # Haalt de nieuwste bonnen als eerste op
+        }
+        resp = requests.get("https://app.robaws.com/api/v2/work-orders", auth=auth, params=params)
+        
+        if resp.status_code != 200:
+            break
+            
+        data = resp.json()
+        items = data.get("items", data.get("data", [])) if isinstance(data, dict) else data
+        
+        if not items:
+            break
+            
+        new_count = 0
+        oudste_datum = "9999-12-31"
+        
+        for item in items:
+            if isinstance(item, dict) and "id" in item:
+                bon_id = item["id"]
+                if bon_id not in all_found_work_orders:
+                    all_found_work_orders[bon_id] = item
+                    new_count += 1
+                    
+                bon_date = item.get("date", "9999-12-31")
+                if bon_date and bon_date < oudste_datum:
+                    oudste_datum = bon_date
+                    
+        print(f"Pagina {page} ingeladen: {new_count} nieuwe bonnen (Oudste datum gevonden: {oudste_datum})")
+        
+        if new_count == 0:
+            break
+            
+        # Zodra de oudste datum op de pagina vóór 1 juli is, hebben we de hele maand te pakken en stoppen we
+        if oudste_datum != "9999-12-31" and oudste_datum < "2026-07-01":
+            print("Datumgrens van 1 juli 2026 gepasseerd. Ophalen is compleet.")
+            break
 
-    # 1. Basis-oproep
-    try:
-        r_base = requests.get("https://app.robaws.com/api/v2/work-orders?includeArchived=true", auth=auth)
-        if r_base.status_code == 200:
-            d_base = r_base.json()
-            items_base = d_base.get("items", d_base.get("data", [])) if isinstance(d_base, dict) else d_base
-            n_base = process_items(items_base)
-            print(f"Basispagina ingeladen: {len(items_base)} bonnen gevonden.")
-    except Exception as e:
-        print(f"Fout bij basis-oproep: {e}")
+    # ID Scanner Fallback: extra check om verborgen gearchiveerde bonnen rond begin juli mee te pakken
+    known_ids = [int(i) for i in all_found_work_orders.keys() if str(i).isdigit()]
+    if known_ids:
+        min_id = min(known_ids)
+        max_id = max(known_ids)
+        start_scan = max(1, min_id - 200) # Scan nog 200 ID's extra terug
+        end_scan = max_id + 50
+        print(f"\nExtra scan voor verborgen bonnen tussen ID {start_scan} en {end_scan}...")
+        for test_id in range(start_scan, end_scan):
+            if test_id not in all_found_work_orders:
+                try:
+                    r_single = requests.get(f"https://app.robaws.com/api/v2/work-orders/{test_id}", auth=auth)
+                    if r_single.status_code == 200:
+                        item_single = r_single.json()
+                        if isinstance(item_single, dict) and "id" in item_single:
+                            all_found_work_orders[item_single["id"]] = item_single
+                except Exception:
+                    pass
 
-    # 2. Verschillende paginerings- en zoekvarianten testen
-    pagination_tests = [
-        {"page": 0, "size": 100},
-        {"page": 1, "size": 100},
-        {"page": 2, "size": 100},
-        {"offset": 20, "limit": 100},
-        {"offset": 100, "limit": 100},
-        {"sort": "-id"},
-        {"sort": "-date"},
-        {"q": "Onderhoudsbeurt"},
-        {"search": "Onderhoudsbeurt"}
-    ]
+    print(f"\n=== TOTAAL {len(all_found_work_orders)} WERKBONNEN VERZAMELD ===")
 
-    for params in pagination_tests:
-        p_params = {"includeArchived": "true"}
-        p_params.update(params)
-        try:
-            resp = requests.get("https://app.robaws.com/api/v2/work-orders", auth=auth, params=p_params)
-            if resp.status_code == 200:
-                d = resp.json()
-                its = d.get("items", d.get("data", [])) if isinstance(d, dict) else d
-                n_added = process_items(its)
-                if n_added > 0:
-                    print(f"Test met {params}: {n_added} nieuwe unieke bonnen toegevoegd!")
-        except Exception:
-            pass
-
-    # 3. ID-Range Scanner Fallback
-    if len(all_found_work_orders) > 0:
-        known_ids = [int(i) for i in all_found_work_orders.keys() if str(i).isdigit()]
-        if known_ids:
-            min_id = min(known_ids)
-            max_id = max(known_ids)
-            print(f"\nScan range gestart rond bekende ID's ({min_id} t/m {max_id + 200})...")
-            scan_count = 0
-            for test_id in range(min_id, max_id + 200):
-                if test_id not in all_found_work_orders:
-                    try:
-                        r_single = requests.get(f"https://app.robaws.com/api/v2/work-orders/{test_id}", auth=auth)
-                        if r_single.status_code == 200:
-                            item_single = r_single.json()
-                            if isinstance(item_single, dict) and "id" in item_single:
-                                all_found_work_orders[item_single["id"]] = item_single
-                                scan_count += 1
-                    except Exception:
-                        pass
-            print(f"ID-scanner heeft {scan_count} extra werkbonnen opgehaald!")
-
-    print(f"\n=== TOTAAL {len(all_found_work_orders)} UNIEKE WERKBONNEN VERZAMELD ===")
-
-    # STAP 2: Filteren op datum en titel
+    # STAP 3: Filteren op Onderhoudsbeurt en uren/extra velden ophalen
     target_work_orders = []
     for item_id, bon in all_found_work_orders.items():
         bon_date = bon.get("date", "")
@@ -103,10 +116,7 @@ def main():
         if "onderhoudsbeurt" in bon_title.lower():
             target_work_orders.append(bon)
 
-    print(f"Aantal relevante onderhoudsbeurten vanaf 1 juli 2026: {len(target_work_orders)}")
-
-    # STAP 3: Urenregistraties EN EXTRA VELDEN ophalen
-    print("\n=== STAP 3: UREN, WERKNEMERS EN EXTRA VELDEN OPRAPEN ===")
+    print(f"Starten met uren & extra velden ophalen van {len(target_work_orders)} relevante onderhoudsbeurten...")
     uren_rijen = []
 
     for bon in target_work_orders:
@@ -122,20 +132,16 @@ def main():
             if "gearchiveerd" not in str(status).lower():
                 status = f"{status} (Gearchiveerd)"
 
-        # ---> NIEUW: Uitlezen van het extra veld 'Onderhoud' <---
+        # Extra veld 'Onderhoud' ophalen
         extra_fields = bon.get("extraFields", {})
         onderhoud_waarde = ""
-        
-        # We zoeken naar de sleutel 'onderhoud' (ongeacht hoofdletters)
         for key, value in extra_fields.items():
             if key.lower() == "onderhoud":
                 if isinstance(value, dict):
-                    # Afhankelijk van het type veld in Robaws, pakken we de juiste waarde
                     field_type = value.get("type", "")
                     if field_type == "BOOLEAN":
                         onderhoud_waarde = "Ja" if value.get("booleanValue") else "Nee"
                     else:
-                        # Tekst, datum of getallen
                         onderhoud_waarde = value.get("stringValue") or value.get("dateValue") or value.get("decimalValue") or value.get("integerValue") or ""
                 else:
                     onderhoud_waarde = str(value)
@@ -173,16 +179,12 @@ def main():
                 werknemer_naam = "Onbekend"
                 emp_info = reg.get("employee") or reg.get("worker")
                 if isinstance(emp_info, dict):
-                    first = emp_info.get("firstName", "") or ""
-                    last = emp_info.get("lastName", "") or ""
-                    full = emp_info.get("name", "") or ""
-                    werknemer_naam = f"{first} {last} {full}".strip()
+                    werknemer_naam = f"{emp_info.get('firstName', '')} {emp_info.get('lastName', '')} {emp_info.get('name', '')}".strip()
                 elif isinstance(emp_info, str):
                     werknemer_naam = emp_info
 
                 if not werknemer_naam or werknemer_naam == "Onbekend":
                     werknemer_naam = reg.get("employeeName") or reg.get("employeeId") or "Onbekend"
-
                 werknemer_naam = " ".join(werknemer_naam.split())
 
                 aantal_uren = reg.get("hours") or reg.get("duration") or reg.get("quantity") or 0.0
@@ -193,32 +195,24 @@ def main():
 
                 opmerking = reg.get("remark") or reg.get("comment") or ""
 
-                # Let op: 'onderhoud_waarde' is hier aan de rij toegevoegd!
                 rij = [bon_id, bon_number, bon_date, werknemer_naam, aantal_uren, opmerking, status, bon_title, onderhoud_waarde]
                 uren_rijen.append(rij)
         else:
-            # Ook hier de 9e kolom toevoegen
             rij = [bon_id, bon_number, bon_date, "Geen uren geregistreerd", 0.0, "", status, bon_title, onderhoud_waarde]
             uren_rijen.append(rij)
 
-    # STAP 4: Wegschrijven naar Google Sheets
-    print("\n=== STAP 4: WEGSCHRIJVEN NAAR GOOGLE SHEETS ===")
-    gc = gspread.service_account(filename=credentials_file)
-    sh = gc.open_by_key(sheet_id)
-    worksheet = sh.worksheet(sheet_name)
+    print("\n=== STAP 4: GOOGLE SHEETS UPDATEN ===")
+    
+    # We voegen de opgeslagen oude rijen en de verse nieuwe rijen samen
+    alle_rijen_compleet = oude_rijen + uren_rijen
+    
+    # We sorteren het geheel strak op datum
+    alle_rijen_compleet.sort(key=lambda x: x[2])
 
     worksheet.clear()
+    worksheet.append_rows([headers] + alle_rijen_compleet)
     
-    # We voegen de kolom 'Onderhoud' toe aan de headers
-    headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving", "Onderhoud"]
-    worksheet.append_row(headers)
-
-    if uren_rijen:
-        uren_rijen.sort(key=lambda x: x[2])
-        worksheet.append_rows(uren_rijen)
-        print(f"Succes! {len(uren_rijen)} urenregels uit {len(target_work_orders)} onderhoudsbeurten toegevoegd aan Google Sheets.")
-    else:
-        print("Geen urenregels gevonden om weg te schrijven.")
+    print(f"Succes! Dashboard is perfect geüpdatet met in totaal {len(alle_rijen_compleet)} rijen.")
 
 if __name__ == "__main__":
     main()
