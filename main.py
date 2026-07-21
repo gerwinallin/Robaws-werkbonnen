@@ -11,133 +11,194 @@ def main():
     credentials_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
     if not robaws_key or not robaws_secret or not sheet_id:
-        print("Fout: Robaws inloggegevens of SHEET_ID ontbreekt.")
+        print("Fout: Inloggegevens ontbreken.")
         return
 
-    print("Verbinden met Google Sheets...")
-    gc = gspread.service_account(filename=credentials_file)
-    sh = gc.open_by_key(sheet_id)
-    worksheet = sh.worksheet(sheet_name)
+    auth = HTTPBasicAuth(robaws_key, robaws_secret)
 
-    # Sheet volledig schoonmaken voor de schone start
-    worksheet.clear()
-    headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving"]
-    worksheet.append_row(headers)
-
-    print("Werkbonnen ophalen uit Robaws (inclusief archief)...")
+    print("=== STAP 1: WERKBONNEN VERZAMELEN & OPHALEN ===")
     
-    all_werkbonnen = []
-    seen_ids = set()
-    
-    # We lopen handmatig door de pagina's met een schone parameter-set om 500-fouten te voorkomen
-    for page in range(1, 40):
-        robaws_url = f"https://app.robaws.com/api/v2/work-orders?includeArchived=true&page={page}&limit=100"
-        response = requests.get(robaws_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
-        
-        if response.status_code != 200:
-            print(f"Paginering gestopt op pagina {page} (Status: {response.status_code})")
-            break
-            
-        data = response.json()
-        items = data.get("items", data.get("data", [])) if isinstance(data, dict) else data
-            
-        if not items:
-            break
-            
-        new_items_on_page = 0
-        for item in items:
-            if isinstance(item, dict):
-                bon_id = item.get("id")
-                if bon_id not in seen_ids:
-                    all_werkbonnen.append(item)
-                    seen_ids.add(bon_id)
-                    new_items_on_page += 1
-                    
-        print(f"Pagina {page} verwerkt. {new_items_on_page} nieuwe bonnen gevonden. Totaal uniek: {len(all_werkbonnen)}")
-        
-        # Als een pagina geen enkele nieuwe bon bevat, zijn we klaar
-        if new_items_on_page == 0:
-            break
+    all_found_work_orders = {}  # Map van ID -> Werkbon dict
 
-    print(f"\nFilteren op datum (vanaf 1 juli 2026) en 'Onderhoudsbeurt'...")
+    def process_items(items):
+        added = 0
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and "id" in item:
+                    item_id = item["id"]
+                    if item_id not in all_found_work_orders:
+                        all_found_work_orders[item_id] = item
+                        added += 1
+        return added
 
-    uren_rijen = []
+    # 1. Basis-oproep
+    try:
+        r_base = requests.get("https://app.robaws.com/api/v2/work-orders?includeArchived=true", auth=auth)
+        if r_base.status_code == 200:
+            d_base = r_base.json()
+            items_base = d_base.get("items", d_base.get("data", [])) if isinstance(d_base, dict) else d_base
+            n_base = process_items(items_base)
+            print(f"Basispagina ingeladen: {len(items_base)} bonnen gevonden.")
+    except Exception as e:
+        print(f"Fout bij basis-oproep: {e}")
 
-    for bon in all_werkbonnen:
-        if not isinstance(bon, dict):
-            continue
-            
-        # FILTER 1: Alleen vanaf 1 juli 2026
+    # 2. Verschillende paginerings- en zoekvarianten testen
+    pagination_tests = [
+        {"page": 0, "size": 100},
+        {"page": 1, "size": 100},
+        {"page": 2, "size": 100},
+        {"offset": 20, "limit": 100},
+        {"offset": 100, "limit": 100},
+        {"sort": "-id"},
+        {"sort": "-date"},
+        {"q": "Onderhoudsbeurt"},
+        {"search": "Onderhoudsbeurt"}
+    ]
+
+    for params in pagination_tests:
+        p_params = {"includeArchived": "true"}
+        p_params.update(params)
+        try:
+            resp = requests.get("https://app.robaws.com/api/v2/work-orders", auth=auth, params=p_params)
+            if resp.status_code == 200:
+                d = resp.json()
+                its = d.get("items", d.get("data", [])) if isinstance(d, dict) else d
+                n_added = process_items(its)
+                if n_added > 0:
+                    print(f"Test met {params}: {n_added} nieuwe unieke bonnen toegevoegd!")
+        except Exception:
+            pass
+
+    # 3. ID-Range Scanner Fallback (garandeert dat recentere/gearchiveerde bonnen worden gevonden)
+    if len(all_found_work_orders) > 0:
+        known_ids = [int(i) for i in all_found_work_orders.keys() if str(i).isdigit()]
+        if known_ids:
+            min_id = min(known_ids)
+            max_id = max(known_ids)
+            print(f"\nScan range gestart rond bekende ID's ({min_id} t/m {max_id + 200})...")
+            scan_count = 0
+            for test_id in range(min_id, max_id + 200):
+                if test_id not in all_found_work_orders:
+                    try:
+                        r_single = requests.get(f"https://app.robaws.com/api/v2/work-orders/{test_id}", auth=auth)
+                        if r_single.status_code == 200:
+                            item_single = r_single.json()
+                            if isinstance(item_single, dict) and "id" in item_single:
+                                all_found_work_orders[item_single["id"]] = item_single
+                                scan_count += 1
+                    except Exception:
+                        pass
+            print(f"ID-scanner heeft {scan_count} extra werkbonnen opgehaald!")
+
+    print(f"\n=== TOTAAL {len(all_found_work_orders)} UNIEKE WERKBONNEN VERZAMELD ===")
+
+    # STAP 2: Filteren op datum (vanaf 1 juli 2026) en 'Onderhoudsbeurt' in titel
+    target_work_orders = []
+    for item_id, bon in all_found_work_orders.items():
         bon_date = bon.get("date", "")
         if not bon_date or bon_date < "2026-07-01":
             continue
 
-        # FILTER 2: Alleen titels met 'Onderhoudsbeurt'
         bon_title = bon.get("title") or bon.get("description") or ""
         if "onderhoudsbeurt" in bon_title.lower():
-            bon_id = str(bon.get("id", ""))
-            bon_number = bon.get("number") or bon.get("code") or ""
-            
-            status = bon.get("status", "")
-            if isinstance(status, dict):
-                status = status.get("name") or status.get("label") or str(status)
-            
-            # Controleer of de bon gearchiveerd is op basis van je nieuwe screenshot veld
-            if bon.get("archivedAt") or bon.get("archived") or bon.get("isArchived"):
-                if "gearchiveerd" not in str(status).lower():
-                    status = f"{status} (Gearchiveerd)"
+            target_work_orders.append(bon)
 
-            # NU MET INCLUDE: We roepen de urenregistratie aan én vragen expliciet om de werknemergegevens
-            time_entries_url = f"https://app.robaws.com/api/v2/work-orders/{bon_id}/time-entries?include=employee"
-            te_response = requests.get(time_entries_url, auth=HTTPBasicAuth(robaws_key, robaws_secret))
-            
-            uren_lijst = []
-            if te_response.status_code == 200:
-                te_data = te_response.json()
-                uren_lijst = te_data.get("items", te_data.get("data", te_data)) if isinstance(te_data, dict) else te_data
+    print(f"Aantal relevante onderhoudsbeurten vanaf 1 juli 2026: {len(target_work_orders)}")
 
-            if isinstance(uren_lijst, list) and uren_lijst:
-                for reg in uren_lijst:
-                    if not isinstance(reg, dict):
-                        continue
-                        
-                    # 1. Werknemer naam ophalen (dit werkt nu perfect dankzij ?include=employee!)
-                    werknemer_naam = "Onbekend"
-                    emp_info = reg.get("employee")
-                    if isinstance(emp_info, dict):
-                        first = emp_info.get("firstName", "") or ""
-                        last = emp_info.get("lastName", "") or ""
-                        full = emp_info.get("name", "") or ""
-                        werknemer_naam = f"{first} {last} {full}".strip()
-                    
-                    if not werknemer_naam or werknemer_naam == "Onbekend":
-                        werknemer_naam = reg.get("employeeName") or "Onbekend"
-                    
-                    werknemer_naam = " ".join(werknemer_naam.split())
+    # STAP 3: Urenregistraties ophalen per onderhoudsbeurt
+    print("\n=== STAP 3: UREN EN WERKNEMERS OPRAPEN ===")
+    uren_rijen = []
 
-                    # 2. Uren uitlezen (exact conform 'hours' uit screenshot)
-                    aantal_uren = reg.get("hours") or 0.0
-                    try:
-                        aantal_uren = float(aantal_uren)
-                    except (ValueError, TypeError):
-                        aantal_uren = 0.0
+    for bon in target_work_orders:
+        bon_id = str(bon.get("id"))
+        bon_number = bon.get("number") or bon.get("code") or ""
+        bon_date = bon.get("date", "")
+        bon_title = bon.get("title") or bon.get("description") or ""
 
-                    # 3. Opmerking uitlezen (exact conform 'remark' uit screenshot)
-                    opmerking = reg.get("remark") or ""
+        status = bon.get("status", "")
+        if isinstance(status, dict):
+            status = status.get("name") or status.get("label") or str(status)
+        if bon.get("archivedAt") or bon.get("archived") or bon.get("isArchived"):
+            if "gearchiveerd" not in str(status).lower():
+                status = f"{status} (Gearchiveerd)"
 
-                    rij = [bon_id, bon_number, bon_date, werknemer_naam, aantal_uren, opmerking, status, bon_title]
-                    uren_rijen.append(rij)
-            else:
-                rij = [bon_id, bon_number, bon_date, "Geen uren geregistreerd", 0.0, "", status, bon_title]
+        time_entries = []
+
+        # 1. Probeer /time-entries endpoint met employee include
+        try:
+            r_te1 = requests.get(f"https://app.robaws.com/api/v2/work-orders/{bon_id}/time-entries?include=employee", auth=auth)
+            if r_te1.status_code == 200:
+                d1 = r_te1.json()
+                items1 = d1.get("items", d1.get("data", d1)) if isinstance(d1, dict) else d1
+                if isinstance(items1, list) and len(items1) > 0:
+                    time_entries = items1
+        except Exception:
+            pass
+
+        # 2. Probeer werkbon detail-endpoint met include
+        if not time_entries:
+            try:
+                r_detail = requests.get(f"https://app.robaws.com/api/v2/work-orders/{bon_id}?include=timeEntries,employee", auth=auth)
+                if r_detail.status_code == 200:
+                    d_detail = r_detail.json()
+                    for k in ["timeEntries", "hourRegistrations", "timeRegistrations", "activities"]:
+                        if k in d_detail and isinstance(d_detail[k], list) and len(d_detail[k]) > 0:
+                            time_entries = d_detail[k]
+                            break
+            except Exception:
+                pass
+
+        # Verwerken van gevonden urenregels
+        if isinstance(time_entries, list) and len(time_entries) > 0:
+            for reg in time_entries:
+                if not isinstance(reg, dict):
+                    continue
+                
+                werknemer_naam = "Onbekend"
+                emp_info = reg.get("employee") or reg.get("worker")
+                if isinstance(emp_info, dict):
+                    first = emp_info.get("firstName", "") or ""
+                    last = emp_info.get("lastName", "") or ""
+                    full = emp_info.get("name", "") or ""
+                    werknemer_naam = f"{first} {last} {full}".strip()
+                elif isinstance(emp_info, str):
+                    werknemer_naam = emp_info
+
+                if not werknemer_naam or werknemer_naam == "Onbekend":
+                    werknemer_naam = reg.get("employeeName") or reg.get("employeeId") or "Onbekend"
+
+                werknemer_naam = " ".join(werknemer_naam.split())
+
+                aantal_uren = reg.get("hours") or reg.get("duration") or reg.get("quantity") or 0.0
+                try:
+                    aantal_uren = float(aantal_uren)
+                except (ValueError, TypeError):
+                    aantal_uren = 0.0
+
+                opmerking = reg.get("remark") or reg.get("comment") or ""
+
+                rij = [bon_id, bon_number, bon_date, werknemer_naam, aantal_uren, opmerking, status, bon_title]
                 uren_rijen.append(rij)
+        else:
+            rij = [bon_id, bon_number, bon_date, "Geen uren geregistreerd", 0.0, "", status, bon_title]
+            uren_rijen.append(rij)
 
-    # Schrijf alles chronologisch weg naar Google Sheets
+    # STAP 4: Wegschrijven naar Google Sheets
+    print("\n=== STAP 4: WEGSCHRIJVEN NAAR GOOGLE SHEETS ===")
+    gc = gspread.service_account(filename=credentials_file)
+    sh = gc.open_by_key(sheet_id)
+    worksheet = sh.worksheet(sheet_name)
+
+    worksheet.clear()
+    headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving"]
+    worksheet.append_row(headers)
+
     if uren_rijen:
         uren_rijen.sort(key=lambda x: x[2])
         worksheet.append_rows(uren_rijen)
-        print(f"Succes! {len(uren_rijen)} regels toegevoegd aan de sheet.")
+        print(f"Succes! {len(uren_rijen)} urenregels uit {len(target_work_orders)} onderhoudsbeurten toegevoegd aan Google Sheets.")
     else:
-        print("Geen onderhoudsbeurten gevonden vanaf 1 juli 2026.")
+        print("Geen urenregels gevonden om weg te schrijven.")
 
 if __name__ == "__main__":
     main()
