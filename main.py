@@ -18,7 +18,7 @@ def main():
 
     print("=== STAP 1: WERKBONNEN VERZAMELEN & OPHALEN ===")
     
-    all_found_work_orders = {}  # Map van ID -> Werkbon dict
+    all_found_work_orders = {}
 
     def process_items(items):
         added = 0
@@ -69,7 +69,7 @@ def main():
         except Exception:
             pass
 
-    # 3. ID-Range Scanner Fallback (garandeert dat recentere/gearchiveerde bonnen worden gevonden)
+    # 3. ID-Range Scanner Fallback
     if len(all_found_work_orders) > 0:
         known_ids = [int(i) for i in all_found_work_orders.keys() if str(i).isdigit()]
         if known_ids:
@@ -92,7 +92,7 @@ def main():
 
     print(f"\n=== TOTAAL {len(all_found_work_orders)} UNIEKE WERKBONNEN VERZAMELD ===")
 
-    # STAP 2: Filteren op datum (vanaf 1 juli 2026) en 'Onderhoudsbeurt' in titel
+    # STAP 2: Filteren op datum en titel
     target_work_orders = []
     for item_id, bon in all_found_work_orders.items():
         bon_date = bon.get("date", "")
@@ -105,8 +105,8 @@ def main():
 
     print(f"Aantal relevante onderhoudsbeurten vanaf 1 juli 2026: {len(target_work_orders)}")
 
-    # STAP 3: Urenregistraties ophalen per onderhoudsbeurt
-    print("\n=== STAP 3: UREN EN WERKNEMERS OPRAPEN ===")
+    # STAP 3: Urenregistraties EN EXTRA VELDEN ophalen
+    print("\n=== STAP 3: UREN, WERKNEMERS EN EXTRA VELDEN OPRAPEN ===")
     uren_rijen = []
 
     for bon in target_work_orders:
@@ -122,9 +122,27 @@ def main():
             if "gearchiveerd" not in str(status).lower():
                 status = f"{status} (Gearchiveerd)"
 
-        time_entries = []
+        # ---> NIEUW: Uitlezen van het extra veld 'Onderhoud' <---
+        extra_fields = bon.get("extraFields", {})
+        onderhoud_waarde = ""
+        
+        # We zoeken naar de sleutel 'onderhoud' (ongeacht hoofdletters)
+        for key, value in extra_fields.items():
+            if key.lower() == "onderhoud":
+                if isinstance(value, dict):
+                    # Afhankelijk van het type veld in Robaws, pakken we de juiste waarde
+                    field_type = value.get("type", "")
+                    if field_type == "BOOLEAN":
+                        onderhoud_waarde = "Ja" if value.get("booleanValue") else "Nee"
+                    else:
+                        # Tekst, datum of getallen
+                        onderhoud_waarde = value.get("stringValue") or value.get("dateValue") or value.get("decimalValue") or value.get("integerValue") or ""
+                else:
+                    onderhoud_waarde = str(value)
+                break
 
-        # 1. Probeer /time-entries endpoint met employee include
+        # Uren ophalen
+        time_entries = []
         try:
             r_te1 = requests.get(f"https://app.robaws.com/api/v2/work-orders/{bon_id}/time-entries?include=employee", auth=auth)
             if r_te1.status_code == 200:
@@ -135,7 +153,6 @@ def main():
         except Exception:
             pass
 
-        # 2. Probeer werkbon detail-endpoint met include
         if not time_entries:
             try:
                 r_detail = requests.get(f"https://app.robaws.com/api/v2/work-orders/{bon_id}?include=timeEntries,employee", auth=auth)
@@ -148,7 +165,6 @@ def main():
             except Exception:
                 pass
 
-        # Verwerken van gevonden urenregels
         if isinstance(time_entries, list) and len(time_entries) > 0:
             for reg in time_entries:
                 if not isinstance(reg, dict):
@@ -177,10 +193,12 @@ def main():
 
                 opmerking = reg.get("remark") or reg.get("comment") or ""
 
-                rij = [bon_id, bon_number, bon_date, werknemer_naam, aantal_uren, opmerking, status, bon_title]
+                # Let op: 'onderhoud_waarde' is hier aan de rij toegevoegd!
+                rij = [bon_id, bon_number, bon_date, werknemer_naam, aantal_uren, opmerking, status, bon_title, onderhoud_waarde]
                 uren_rijen.append(rij)
         else:
-            rij = [bon_id, bon_number, bon_date, "Geen uren geregistreerd", 0.0, "", status, bon_title]
+            # Ook hier de 9e kolom toevoegen
+            rij = [bon_id, bon_number, bon_date, "Geen uren geregistreerd", 0.0, "", status, bon_title, onderhoud_waarde]
             uren_rijen.append(rij)
 
     # STAP 4: Wegschrijven naar Google Sheets
@@ -190,7 +208,9 @@ def main():
     worksheet = sh.worksheet(sheet_name)
 
     worksheet.clear()
-    headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving"]
+    
+    # We voegen de kolom 'Onderhoud' toe aan de headers
+    headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving", "Onderhoud"]
     worksheet.append_row(headers)
 
     if uren_rijen:
