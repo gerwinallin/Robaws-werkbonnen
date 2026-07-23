@@ -4,17 +4,26 @@ import gspread
 from requests.auth import HTTPBasicAuth
 
 def extract_employee_name(reg):
-    """Zoekt slim in alle mogelijke Robaws-velden naar de naam van de monteur."""
+    """Zoekt slim in de gehele urenregistratie naar de naam van de monteur."""
     if not isinstance(reg, dict):
         return "Onbekend"
     
-    # 1. Directe tekstvelden
-    for key in ["employeeName", "workerName", "userName", "createdByName"]:
+    # Directe herkenning op de hele datastructuur van de urenregel
+    reg_str = str(reg).lower()
+    
+    if "sjon" in reg_str or "koster" in reg_str:
+        return "Sjon"
+    elif "ramazan" in reg_str:
+        return "Ramazan"
+    elif "rik" in reg_str:
+        return "Rik"
+        
+    # Uitgebreide veldcheck voor overige monteurs
+    for key in ["employeeName", "workerName", "userName", "createdByName", "displayName", "name"]:
         val = reg.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
             
-    # 2. Geneste objecten (employee, worker, user)
     for dict_key in ["employee", "worker", "user", "createdBy"]:
         obj = reg.get(dict_key)
         if isinstance(obj, dict):
@@ -23,7 +32,7 @@ def extract_employee_name(reg):
             full = f"{fn} {ln}".strip()
             if full:
                 return full
-            for name_key in ["name", "label", "displayName", "username"]:
+            for name_key in ["name", "label", "displayName", "username", "formattedName"]:
                 val = obj.get(name_key)
                 if isinstance(val, str) and val.strip():
                     return val.strip()
@@ -140,7 +149,7 @@ def main():
     # STAP 3: Uren verzamelen & Sjon dag-totalen opbouwen
     print("\n=== STAP 3: UREN VERZAMELEN & DAGTOTALEN BEPALEN ===")
     tijdelijke_registraties = []
-    sjon_dag_uren = {}  # Onthoudt per datum de totale uren van Sjon
+    sjon_dag_uren = {}
 
     for bon in target_work_orders:
         bon_id = str(bon.get("id"))
@@ -148,7 +157,7 @@ def main():
         bon_date = bon.get("date", "")
         bon_title = bon.get("title") or bon.get("description") or ""
 
-        # Verwijder oude versies van deze werkbon uit de tijdelijke dict (voorkomt dubbele Onbekend rijen)
+        # Oude opgeslagen versies van deze werkbon (inclusief oude "Onbekend" regels) opruimen
         keys_to_remove = [k for k in bestaande_rijen_dict.keys() if k.startswith(f"{bon_id}_")]
         for k in keys_to_remove:
             del bestaande_rijen_dict[k]
@@ -187,7 +196,11 @@ def main():
 
         time_entries = []
         try:
-            r_detail = requests.get(f"https://app.robaws.com/api/v2/work-orders/{bon_id}?include=timeEntries,employee,worker,user", auth=auth)
+            # Vraag Robaws expliciet om alle geneste werknemer-objecten uit te vouwen
+            r_detail = requests.get(
+                f"https://app.robaws.com/api/v2/work-orders/{bon_id}?include=timeEntries,timeEntries.employee,hourRegistrations,hourRegistrations.employee,employee",
+                auth=auth
+            )
             if r_detail.status_code == 200:
                 d_detail = r_detail.json()
                 for k in ["timeEntries", "hourRegistrations", "timeRegistrations", "activities"]:
@@ -205,7 +218,6 @@ def main():
                 aantal_uren = float(reg.get("hours") or reg.get("duration") or 0.0)
                 opmerking = reg.get("remark") or reg.get("comment") or ""
 
-                # Optellen uren Sjon per dag
                 if "sjon" in werknemer_naam.lower():
                     sjon_dag_uren[bon_date] = sjon_dag_uren.get(bon_date, 0.0) + aantal_uren
 
@@ -245,18 +257,17 @@ def main():
         opbrengst = item["opbrengst"]
 
         if "sjon" in naam_klein:
-            # Pro-Rata verdeling van € 240,- vaste dagkosten (8u x €30)
             totale_uren_sjon_vandaag = sjon_dag_uren.get(bon_date, 0.0)
             if totale_uren_sjon_vandaag > 0:
                 kosten = round((aantal_uren / totale_uren_sjon_vandaag) * 240.00, 2)
             else:
                 kosten = 0.0
         elif "ramazan" in naam_klein:
-            kosten = 60.00  # Vaste kosten per beurt
+            kosten = 60.00
         elif "rik" in naam_klein:
-            kosten = round(aantal_uren * 40.00, 2)  # € 40 / uur
+            kosten = round(aantal_uren * 40.00, 2)
         else:
-            kosten = round(aantal_uren * 30.00, 2)  # Standaard uurtarief
+            kosten = round(aantal_uren * 30.00, 2)
 
         marge = round(opbrengst - kosten, 2)
 
@@ -275,7 +286,7 @@ def main():
     
     worksheet.clear()
     worksheet.append_rows([headers] + definitieve_rijen)
-    print(f"Succes! Google Sheets geüpdatet met pro-rata dagkosten voor Sjon ({len(definitieve_rijen)} rijen bewaard).")
+    print(f"Succes! Google Sheets opgeschoond en geüpdatet met de juiste werknemer-namen ({len(definitieve_rijen)} rijen bewaard).")
 
 if __name__ == "__main__":
     main()
