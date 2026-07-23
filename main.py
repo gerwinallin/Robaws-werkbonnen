@@ -16,6 +16,10 @@ def extract_employee_name(reg):
         return "Ramazan"
     elif "rik" in reg_str:
         return "Rik"
+    elif "mark" in reg_str:
+        return "Mark"
+    elif "remco" in reg_str:
+        return "Remco"
         
     for key in ["employeeName", "workerName", "userName", "createdByName", "displayName", "name"]:
         val = reg.get(key)
@@ -37,15 +41,54 @@ def extract_employee_name(reg):
                     
     return "Onbekend"
 
-def bereken_totale_opbrengst(titel):
-    """Scant de titel en telt ALLE aanwezige contracten/apparaten bij elkaar op."""
+def bepaal_ketelmerk(titel):
+    """Herken het merk van de CV-ketel/installatie uit de titel."""
+    titel_lower = str(titel).lower()
+    
+    if "remeha" in titel_lower:
+        return "Remeha"
+    elif "nefit" in titel_lower:
+        return "Nefit"
+    elif "intergas" in titel_lower:
+        return "Intergas"
+    elif "vaillant" in titel_lower:
+        return "Vaillant"
+    elif "atag" in titel_lower:
+        return "Atag"
+    elif "brink" in titel_lower:
+        return "Brink"
+    elif "ferroli" in titel_lower:
+        return "Ferroli"
+    elif "itho" in titel_lower or "daalderop" in titel_lower:
+        return "Itho Daalderop"
+    else:
+        return "Overig / Onbekend"
+
+def bepaal_voorrijtijd_uren(zoek_tekst):
+    """Bepaalt de vaste voorrijtijd in uren uitsluitend voor STORINGEN."""
+    tekst = str(zoek_tekst).lower()
+    
+    if "biddinghuizen" in tekst:
+        return 0.25  # 15 minuten
+    elif "dronten" in tekst:
+        return 0.50  # 30 minuten
+    elif "swifterbant" in tekst:
+        return 0.50  # 30 minuten
+    elif "lelystad" in tekst:
+        return 0.75  # 45 minuten
+    elif "almere" in tekst:
+        return 1.00  # 60 minuten
+    else:
+        return 0.75  # Overig = 45 minuten
+
+def bereken_totale_opbrengst_onderhoud(titel):
+    """Scant de titel van een ONDERHOUDSBEURT en telt alle apparaten/contracten op."""
     titel_lower = titel.lower()
     totale_opbrengst = 0.0
 
     # 1. Comfort Plus (€ 362)
     aantal_comfort_plus = titel_lower.count("comfort plus")
     totale_opbrengst += aantal_comfort_plus * 362.00
-    # Verwijder 'comfort plus' uit de zoektekst zodat 'comfort' niet dubbel telt
     titel_verwerkt = titel_lower.replace("comfort plus", "")
 
     # 2. Comfort (€ 309)
@@ -60,11 +103,23 @@ def bereken_totale_opbrengst(titel):
     aantal_eenmalig = titel_verwerkt.count("eenmalig")
     totale_opbrengst += aantal_eenmalig * 110.00
 
-    # Als er géén bekende contracten in de titel stonden, pakt hij het standaard tarief
     if totale_opbrengst == 0.0:
         return 300.00
     
     return totale_opbrengst
+
+def bereken_opbrengst_storing(titel):
+    """Bepaalt de opbrengst bij STORINGEN op basis van de contractvorm."""
+    titel_lower = titel.lower()
+
+    if "comfort plus" in titel_lower or "comfort" in titel_lower:
+        return 0.00
+    elif "basis" in titel_lower:
+        return 223.00
+    elif "eenmalig" in titel_lower:
+        return 110.00
+    else:
+        return 300.00
 
 def main():
     # 1. Inloggegevens en Omgevingsvariabelen ophalen
@@ -80,23 +135,30 @@ def main():
 
     auth = HTTPBasicAuth(robaws_key, robaws_secret)
 
-    # === GOOGLE SHEETS VOORBEREIDEN (Huidige data uitlezen) ===
+    # === GOOGLE SHEETS VOORBEREIDEN ===
     gc = gspread.service_account(filename=credentials_file)
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
     
-    bestaande_data = worksheet.get_all_values()
-    headers = ["Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving", "Onderhoud", "Opbrengst (€)", "Kosten (€)", "Marge (€)"]
+    headers = [
+        "Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", 
+        "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving", 
+        "Ketelmerk", "Onderhoud", "Type Werkbon", "Opbrengst (€)", "Kosten (€)", "Marge (€)"
+    ]
     
-    if not bestaande_data:
-        bestaande_data = [headers]
-        
-    bestaande_rijen_dict = {}
-    for i, rij in enumerate(bestaande_data):
-        if i == 0: continue
-        if len(rij) > 3:
-            sleutel = f"{rij[0]}_{rij[3]}"
-            bestaande_rijen_dict[sleutel] = rij
+    bestaande_data = worksheet.get_all_values()
+    
+    # 🗑️ SCHONE LEI LATER GARANDEREN:
+    # We bewaren alleen historische data van vóór 1 juli 2026 (indien aanwezig).
+    # Alles vanaf 1 juli 2026 wordt vers opgebouwd uit Robaws. 
+    # Als een bon in Robaws is gewist, verdwijnt hij hierdoor automatisch uit de Sheet!
+    nieuwe_rijen_dict = {}
+    if bestaande_data:
+        for i, rij in enumerate(bestaande_data):
+            if i == 0: continue
+            if len(rij) > 2 and rij[2] < "2026-07-01":
+                sleutel = f"{rij[0]}_{rij[3]}"
+                nieuwe_rijen_dict[sleutel] = rij
 
     print("=== STAP 1: WERKBONNEN VERZAMELEN UIT ROBAWS ===")
     all_found_work_orders = {}
@@ -124,7 +186,7 @@ def main():
     pagination_tests = [
         {"page": 0, "size": 100}, {"page": 1, "size": 100}, {"page": 2, "size": 100},
         {"offset": 20, "limit": 100}, {"offset": 100, "limit": 100},
-        {"q": "Onderhoudsbeurt"}, {"search": "Onderhoudsbeurt"}
+        {"q": "Onderhoudsbeurt CV:"}, {"q": "Storing:"}, {"search": "Onderhoudsbeurt CV:"}, {"search": "Storing:"}
     ]
 
     for params in pagination_tests:
@@ -158,7 +220,7 @@ def main():
         print("WAARSCHUWING: 0 werkbonnen opgehaald. Google Sheets blijft ongewijzigd.")
         return
 
-    # STAP 2: Filteren op datum en titel
+    # STAP 2: Filteren op datum (vanaf 1 juli 2026) en titel-matchen
     target_work_orders = []
     for item_id, bon in all_found_work_orders.items():
         bon_date = bon.get("date", "")
@@ -166,15 +228,17 @@ def main():
             continue
 
         bon_title = bon.get("title") or bon.get("description") or ""
-        if "onderhoudsbeurt" in bon_title.lower():
+        bon_title_lower = bon_title.lower()
+        
+        if "storing:" in bon_title_lower or "onderhoudsbeurt cv:" in bon_title_lower:
             target_work_orders.append(bon)
 
     if len(target_work_orders) == 0:
-        print("Geen relevante onderhoudsbeurten gevonden.")
+        print("Geen relevante werkbonnen gevonden.")
         return
 
-    # STAP 3: Uren verzamelen & Sjon dag-totalen opbouwen
-    print("\n=== STAP 3: UREN VERZAMELEN & DAGTOTALEN BEPALEN ===")
+    # STAP 3: Uren verzamelen, Ketelmerk bepalen & Voorrijtijd berekenen
+    print("\n=== STAP 3: UREN, KETELMERK & VOORRIJTIJD VERZAMELEN ===")
     tijdelijke_registraties = []
     sjon_dag_uren = {}
 
@@ -183,11 +247,6 @@ def main():
         bon_number = bon.get("number") or bon.get("code") or ""
         bon_date = bon.get("date", "")
         bon_title = bon.get("title") or bon.get("description") or ""
-
-        # Oude opgeslagen versies van deze werkbon opruimen uit het geheugen
-        keys_to_remove = [k for k in bestaande_rijen_dict.keys() if k.startswith(f"{bon_id}_")]
-        for k in keys_to_remove:
-            del bestaande_rijen_dict[k]
 
         status = bon.get("status", "")
         if isinstance(status, dict):
@@ -205,9 +264,23 @@ def main():
                 else:
                     onderhoud_waarde = str(value)
                 break
-                
-        # 💶 BEREKEN DE TOTALE OPBRENGST VAN ALLE CONTRACTEN IN DE TITEL
-        opbrengst = bereken_totale_opbrengst(bon_title)
+
+        # 🏷️ KETELMERK BEPALEN
+        ketelmerk = bepaal_ketelmerk(bon_title)
+
+        # 🎯 TYPE WERKBON, OPBRENGST & VOORRIJTIJD BEPALEN
+        bon_title_lower = bon_title.lower()
+        if "storing:" in bon_title_lower:
+            type_werkbon = "Storing"
+            opbrengst = bereken_opbrengst_storing(bon_title)
+            
+            # Voorrijtijd ALLEEN ophalen bij STORINGEN:
+            zoek_locatie_tekst = f"{bon_title} {bon.get('city', '')} {bon.get('address', '')} {bon.get('customerName', '')}"
+            voorrijtijd_extra = bepaal_voorrijtijd_uren(zoek_locatie_tekst)
+        else:
+            type_werkbon = "Onderhoud"
+            opbrengst = bereken_totale_opbrengst_onderhoud(bon_title)
+            voorrijtijd_extra = 0.0
 
         time_entries = []
         try:
@@ -225,12 +298,17 @@ def main():
             pass
 
         if isinstance(time_entries, list) and len(time_entries) > 0:
-            for reg in time_entries:
+            for index, reg in enumerate(time_entries):
                 if not isinstance(reg, dict): continue
                 
                 werknemer_naam = extract_employee_name(reg)
-                aantal_uren = float(reg.get("hours") or reg.get("duration") or 0.0)
+                basis_uren = float(reg.get("hours") or reg.get("duration") or 0.0)
                 opmerking = reg.get("remark") or reg.get("comment") or ""
+
+                if index == 0 and type_werkbon == "Storing":
+                    aantal_uren = round(basis_uren + voorrijtijd_extra, 2)
+                else:
+                    aantal_uren = basis_uren
 
                 if "sjon" in werknemer_naam.lower():
                     sjon_dag_uren[bon_date] = sjon_dag_uren.get(bon_date, 0.0) + aantal_uren
@@ -244,25 +322,30 @@ def main():
                     "opmerking": opmerking,
                     "status": status,
                     "bon_title": bon_title,
+                    "ketelmerk": ketelmerk,
                     "onderhoud_waarde": onderhoud_waarde,
+                    "type_werkbon": type_werkbon,
                     "opbrengst": opbrengst
                 })
         else:
+            totaal_uren = voorrijtijd_extra if type_werkbon == "Storing" else 0.0
             tijdelijke_registraties.append({
                 "bon_id": bon_id,
                 "bon_number": bon_number,
                 "bon_date": bon_date,
                 "werknemer_naam": "Geen uren geregistreerd",
-                "aantal_uren": 0.0,
+                "aantal_uren": totaal_uren,
                 "opmerking": "",
                 "status": status,
                 "bon_title": bon_title,
+                "ketelmerk": ketelmerk,
                 "onderhoud_waarde": onderhoud_waarde,
+                "type_werkbon": type_werkbon,
                 "opbrengst": opbrengst
             })
 
-    # STAP 4: Financiën Berekenen (Inclusief Pro-Rata Vaste Kosten Sjon)
-    print("=== STAP 4: PRO-RATA KOSTEN BEREKENEN ===")
+    # STAP 4: Financiën Berekenen
+    print("=== STAP 4: KOSTEN EN MARGE BEREKENEN ===")
     for item in tijdelijke_registraties:
         werknemer_naam = item["werknemer_naam"]
         naam_klein = werknemer_naam.lower()
@@ -280,6 +363,8 @@ def main():
             kosten = 60.00
         elif "rik" in naam_klein:
             kosten = round(aantal_uren * 40.00, 2)
+        elif "mark" in naam_klein or "remco" in naam_klein:
+            kosten = round(aantal_uren * 45.00, 2)
         else:
             kosten = round(aantal_uren * 30.00, 2)
 
@@ -288,19 +373,20 @@ def main():
         rij = [
             item["bon_id"], item["bon_number"], item["bon_date"], werknemer_naam,
             aantal_uren, item["opmerking"], item["status"], item["bon_title"],
-            item["onderhoud_waarde"], opbrengst, kosten, marge
+            item["ketelmerk"], item["onderhoud_waarde"], item["type_werkbon"],
+            opbrengst, kosten, marge
         ]
 
         sleutel = f"{item['bon_id']}_{werknemer_naam}"
-        bestaande_rijen_dict[sleutel] = rij
+        nieuwe_rijen_dict[sleutel] = rij
 
     # STAP 5: WEGSCHRIJVEN NAAR GOOGLE SHEETS
-    definitieve_rijen = list(bestaande_rijen_dict.values())
+    definitieve_rijen = list(nieuwe_rijen_dict.values())
     definitieve_rijen.sort(key=lambda x: str(x[2]))
     
     worksheet.clear()
     worksheet.append_rows([headers] + definitieve_rijen)
-    print(f"Succes! Google Sheets geüpdatet met de optelsom van meerdere contracten per werkbon ({len(definitieve_rijen)} rijen bewaard).")
+    print(f"Succes! Google Sheets opschoond, ketelmerk toegevoegd en geüpdatet ({len(definitieve_rijen)} rijen opgeslagen).")
 
 if __name__ == "__main__":
     main()
