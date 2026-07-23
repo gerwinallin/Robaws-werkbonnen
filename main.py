@@ -8,7 +8,6 @@ def extract_employee_name(reg):
     if not isinstance(reg, dict):
         return "Onbekend"
     
-    # Directe herkenning op de hele datastructuur van de urenregel
     reg_str = str(reg).lower()
     
     if "sjon" in reg_str or "koster" in reg_str:
@@ -18,7 +17,6 @@ def extract_employee_name(reg):
     elif "rik" in reg_str:
         return "Rik"
         
-    # Uitgebreide veldcheck voor overige monteurs
     for key in ["employeeName", "workerName", "userName", "createdByName", "displayName", "name"]:
         val = reg.get(key)
         if isinstance(val, str) and val.strip():
@@ -38,6 +36,35 @@ def extract_employee_name(reg):
                     return val.strip()
                     
     return "Onbekend"
+
+def bereken_totale_opbrengst(titel):
+    """Scant de titel en telt ALLE aanwezige contracten/apparaten bij elkaar op."""
+    titel_lower = titel.lower()
+    totale_opbrengst = 0.0
+
+    # 1. Comfort Plus (€ 362)
+    aantal_comfort_plus = titel_lower.count("comfort plus")
+    totale_opbrengst += aantal_comfort_plus * 362.00
+    # Verwijder 'comfort plus' uit de zoektekst zodat 'comfort' niet dubbel telt
+    titel_verwerkt = titel_lower.replace("comfort plus", "")
+
+    # 2. Comfort (€ 309)
+    aantal_comfort = titel_verwerkt.count("comfort")
+    totale_opbrengst += aantal_comfort * 309.00
+
+    # 3. Basis (€ 223)
+    aantal_basis = titel_verwerkt.count("basis")
+    totale_opbrengst += aantal_basis * 223.00
+
+    # 4. Eenmalig (€ 110)
+    aantal_eenmalig = titel_verwerkt.count("eenmalig")
+    totale_opbrengst += aantal_eenmalig * 110.00
+
+    # Als er géén bekende contracten in de titel stonden, pakt hij het standaard tarief
+    if totale_opbrengst == 0.0:
+        return 300.00
+    
+    return totale_opbrengst
 
 def main():
     # 1. Inloggegevens en Omgevingsvariabelen ophalen
@@ -157,7 +184,7 @@ def main():
         bon_date = bon.get("date", "")
         bon_title = bon.get("title") or bon.get("description") or ""
 
-        # Oude opgeslagen versies van deze werkbon (inclusief oude "Onbekend" regels) opruimen
+        # Oude opgeslagen versies van deze werkbon opruimen uit het geheugen
         keys_to_remove = [k for k in bestaande_rijen_dict.keys() if k.startswith(f"{bon_id}_")]
         for k in keys_to_remove:
             del bestaande_rijen_dict[k]
@@ -179,24 +206,11 @@ def main():
                     onderhoud_waarde = str(value)
                 break
                 
-        # Opbrengst bepalen
-        titel_lower = bon_title.lower()
-        opbrengst = 0.0
-        
-        if "comfort plus" in titel_lower:
-            opbrengst = 362.00
-        elif "comfort" in titel_lower:
-            opbrengst = 309.00
-        elif "basis" in titel_lower:
-            opbrengst = 223.00
-        elif "eenmalig" in titel_lower:
-            opbrengst = 110.00
-        elif "huurketel" in titel_lower:
-            opbrengst = 150.00
+        # 💶 BEREKEN DE TOTALE OPBRENGST VAN ALLE CONTRACTEN IN DE TITEL
+        opbrengst = bereken_totale_opbrengst(bon_title)
 
         time_entries = []
         try:
-            # Vraag Robaws expliciet om alle geneste werknemer-objecten uit te vouwen
             r_detail = requests.get(
                 f"https://app.robaws.com/api/v2/work-orders/{bon_id}?include=timeEntries,timeEntries.employee,hourRegistrations,hourRegistrations.employee,employee",
                 auth=auth
@@ -286,7 +300,7 @@ def main():
     
     worksheet.clear()
     worksheet.append_rows([headers] + definitieve_rijen)
-    print(f"Succes! Google Sheets opgeschoond en geüpdatet met de juiste werknemer-namen ({len(definitieve_rijen)} rijen bewaard).")
+    print(f"Succes! Google Sheets geüpdatet met de optelsom van meerdere contracten per werkbon ({len(definitieve_rijen)} rijen bewaard).")
 
 if __name__ == "__main__":
     main()
