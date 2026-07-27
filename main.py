@@ -140,18 +140,27 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
     
+    # 🎯 OORSPRONKELIJKE KOLOMVOLGORDE VOOR HET DASHBOARD HERSTELD + EXTRA NIEUWE KOLOMMEN ACHTERAAN
     headers = [
-        "Werkbon ID", "Nummer", "Datum", "Werknemer", "Uren", 
-        "Opmerking Werknemer", "Status Werkbon", "Titel / Omschrijving", 
-        "Ketelmerk", "Onderhoud", "Type Werkbon", "Opbrengst (€)", "Kosten (€)", "Marge (€)"
+        "Werkbon ID",           # 1
+        "Nummer",               # 2
+        "Datum",                # 3
+        "Werknemer",            # 4
+        "Uren",                 # 5
+        "Opmerking Werknemer",  # 6
+        "Status Werkbon",       # 7
+        "Titel / Omschrijving", # 8
+        "Onderhoud",            # 9
+        "Opbrengst (€)",        # 10
+        "Kosten (€)",           # 11
+        "Marge (€)",            # 12
+        "Type Werkbon",         # 13 (Nieuw)
+        "Ketelmerk"             # 14 (Nieuw)
     ]
     
     bestaande_data = worksheet.get_all_values()
     
-    # 🗑️ SCHONE LEI LATER GARANDEREN:
-    # We bewaren alleen historische data van vóór 1 juli 2026 (indien aanwezig).
-    # Alles vanaf 1 juli 2026 wordt vers opgebouwd uit Robaws. 
-    # Als een bon in Robaws is gewist, verdwijnt hij hierdoor automatisch uit de Sheet!
+    # Data van vóór 1 juli 2026 bewaren indien aanwezig
     nieuwe_rijen_dict = {}
     if bestaande_data:
         for i, rij in enumerate(bestaande_data):
@@ -265,16 +274,13 @@ def main():
                     onderhoud_waarde = str(value)
                 break
 
-        # 🏷️ KETELMERK BEPALEN
         ketelmerk = bepaal_ketelmerk(bon_title)
 
-        # 🎯 TYPE WERKBON, OPBRENGST & VOORRIJTIJD BEPALEN
         bon_title_lower = bon_title.lower()
         if "storing:" in bon_title_lower:
             type_werkbon = "Storing"
             opbrengst = bereken_opbrengst_storing(bon_title)
             
-            # Voorrijtijd ALLEEN ophalen bij STORINGEN:
             zoek_locatie_tekst = f"{bon_title} {bon.get('city', '')} {bon.get('address', '')} {bon.get('customerName', '')}"
             voorrijtijd_extra = bepaal_voorrijtijd_uren(zoek_locatie_tekst)
         else:
@@ -370,11 +376,22 @@ def main():
 
         marge = round(opbrengst - kosten, 2)
 
+        # 🎯 OPBOUW VAN DE RIJ EXACT MET DE EERSTE 12 OORSPRONKELIJKE KOLOMMEN + NIEUWE VELDEN ACHTERAAN
         rij = [
-            item["bon_id"], item["bon_number"], item["bon_date"], werknemer_naam,
-            aantal_uren, item["opmerking"], item["status"], item["bon_title"],
-            item["ketelmerk"], item["onderhoud_waarde"], item["type_werkbon"],
-            opbrengst, kosten, marge
+            item["bon_id"],           # 1. Werkbon ID
+            item["bon_number"],       # 2. Nummer
+            item["bon_date"],         # 3. Datum
+            werknemer_naam,           # 4. Werknemer
+            aantal_uren,              # 5. Uren
+            item["opmerking"],        # 6. Opmerking Werknemer
+            item["status"],           # 7. Status Werkbon
+            item["bon_title"],        # 8. Titel / Omschrijving
+            item["onderhoud_waarde"], # 9. Onderhoud
+            opbrengst,                # 10. Opbrengst (€)
+            kosten,                   # 11. Kosten (€)
+            marge,                    # 12. Marge (€)
+            item["type_werkbon"],     # 13. Type Werkbon (Nieuw)
+            item["ketelmerk"]         # 14. Ketelmerk (Nieuw)
         ]
 
         sleutel = f"{item['bon_id']}_{werknemer_naam}"
@@ -386,7 +403,7 @@ def main():
     
     worksheet.clear()
     worksheet.append_rows([headers] + definitieve_rijen)
-    print(f"Succes! Google Sheets opschoond, ketelmerk toegevoegd en geüpdatet ({len(definitieve_rijen)} rijen opgeslagen).")
+    print(f"Succes! Oorspronkelijke kolomvolgorde hersteld en nieuwe velden achteraan toegevoegd ({len(definitieve_rijen)} rijen opgeslagen).")
 
 if __name__ == "__main__":
     main()
