@@ -85,32 +85,17 @@ def bereken_opbrengst_storing(contract_soort, totale_uren):
 
 def vind_stad(bon):
     """Zoekt de stad op basis van de officiële Robaws OpenAPI specificatie."""
-    if not isinstance(bon, dict):
-        return "Onbekend"
-        
-    # 1. Officiële Robaws locatie: Werkbon -> address object -> city
+    if not isinstance(bon, dict): return "Onbekend"
     addr = bon.get("address")
-    if isinstance(addr, dict) and addr.get("city"):
-        return str(addr.get("city")).strip().title()
-        
-    # 2. Fallback: Werkbon -> projectAddress -> city
+    if isinstance(addr, dict) and addr.get("city"): return str(addr.get("city")).strip().title()
     p_addr = bon.get("projectAddress")
-    if isinstance(p_addr, dict) and p_addr.get("city"):
-        return str(p_addr.get("city")).strip().title()
-        
-    # 3. Fallback: Klant adres -> city
+    if isinstance(p_addr, dict) and p_addr.get("city"): return str(p_addr.get("city")).strip().title()
     cust = bon.get("client") or bon.get("customer")
     if isinstance(cust, dict):
-        if cust.get("city"):
-            return str(cust.get("city")).strip().title()
+        if cust.get("city"): return str(cust.get("city")).strip().title()
         c_addr = cust.get("address")
-        if isinstance(c_addr, dict) and c_addr.get("city"):
-            return str(c_addr.get("city")).strip().title()
-            
-    # 4. Fallback: Directe 'city' sleutel
-    if bon.get("city"):
-        return str(bon.get("city")).strip().title()
-
+        if isinstance(c_addr, dict) and c_addr.get("city"): return str(c_addr.get("city")).strip().title()
+    if bon.get("city"): return str(bon.get("city")).strip().title()
     return "Onbekend"
 
 def main():
@@ -129,13 +114,13 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
     
-    # 🎯 OORSPRONKELIJKE KOLOMMEN 1 T/M 14 ONGEWIJZIGD + 15 EN 16 NIEUW ACHTERAAN
+    # 🎯 17 KOLOMMEN (VOORRIJTIJD GEHEEL ACHTERAAN TOEGEVOEGD)
     headers = [
         "Werkbon ID",           # 1
         "Nummer",               # 2
         "Datum",                # 3
         "Werknemer",            # 4
-        "Uren",                 # 5
+        "Uren",                 # 5 (Puur de gemaakte uren uit Robaws!)
         "Opmerking Werknemer",  # 6
         "Status Werkbon",       # 7
         "Titel / Omschrijving", # 8
@@ -145,8 +130,9 @@ def main():
         "Marge (€)",            # 12
         "Type Werkbon",         # 13
         "Ketelmerk",            # 14
-        "Stad",                 # 15 (Achteraan)
-        "Contract"              # 16 (Achteraan)
+        "Stad",                 # 15
+        "Contract",             # 16
+        "Voorrijtijd (uren)"    # 17 (NIEUW ACHTERAAN)
     ]
     
     bestaande_data = worksheet.get_all_values()
@@ -171,7 +157,7 @@ def main():
                     get_val("Uren"), get_val("Opmerking Werknemer"), get_val("Status Werkbon"), 
                     get_val("Titel / Omschrijving"), get_val("Onderhoud"), get_val("Opbrengst (€)"), 
                     get_val("Kosten (€)"), get_val("Marge (€)"), get_val("Type Werkbon"), get_val("Ketelmerk"),
-                    get_val("Stad"), get_val("Contract")
+                    get_val("Stad"), get_val("Contract"), get_val("Voorrijtijd (uren)")
                 ]
                 nieuwe_rijen_dict[sleutel] = herbouwde_rij
 
@@ -276,9 +262,7 @@ def main():
                     onderhoud_waarde = str(value)
                 break
 
-        # Robuust de stad bepalen via de OpenAPI-structuur
         stad = vind_stad(bon)
-
         ketelmerk = bepaal_ketelmerk(bon_title)
         contract = bepaal_contract_soort(bon_title)
         bon_title_lower = bon_title.lower()
@@ -295,10 +279,7 @@ def main():
             )
             if r_detail.status_code == 200:
                 d_detail = r_detail.json()
-                
-                # Check of de extra detail-API de stad alsnog kan invullen
-                if stad == "Onbekend":
-                    stad = vind_stad(d_detail)
+                if stad == "Onbekend": stad = vind_stad(d_detail)
                     
                 for k in ["timeEntries", "hourRegistrations", "timeRegistrations", "activities"]:
                     if k in d_detail and isinstance(d_detail[k], list) and len(d_detail[k]) > 0:
@@ -315,29 +296,36 @@ def main():
                 basis_uren = float(reg.get("hours") or reg.get("duration") or 0.0)
                 opmerking = reg.get("remark") or reg.get("comment") or ""
 
-                if index == 0 and type_werkbon == "Storing":
-                    aantal_uren = round(basis_uren + voorrijtijd_extra, 2)
-                else:
-                    aantal_uren = basis_uren
+                # PUUR GEMAAKTE UREN (ZONDER VOORRIJTIJD)
+                aantal_uren = basis_uren
+                
+                # Voorrijtijd op de 1e regel zetten van een storing
+                rij_voorrijtijd = voorrijtijd_extra if (index == 0 and type_werkbon == "Storing") else 0.0
+                
+                # Totale inzettijd voor de kosten/opbrengst berekening
+                totale_inzet_uren = aantal_uren + rij_voorrijtijd
 
                 if type_werkbon == "Storing":
-                    rij_opbrengst = bereken_opbrengst_storing(contract, aantal_uren)
+                    rij_opbrengst = bereken_opbrengst_storing(contract, totale_inzet_uren)
                 else:
                     rij_opbrengst = bereken_totale_opbrengst_onderhoud(bon_title) if index == 0 else 0.0
 
                 if "sjon" in werknemer_naam.lower():
-                    sjon_dag_uren[bon_date] = sjon_dag_uren.get(bon_date, 0.0) + aantal_uren
+                    sjon_dag_uren[bon_date] = sjon_dag_uren.get(bon_date, 0.0) + totale_inzet_uren
 
                 tijdelijke_registraties.append({
                     "bon_id": bon_id, "bon_number": bon_number, "bon_date": bon_date, "werknemer_naam": werknemer_naam,
-                    "aantal_uren": aantal_uren, "opmerking": opmerking, "status": status, "bon_title": bon_title,
+                    "aantal_uren": aantal_uren, "voorrijtijd": rij_voorrijtijd, "totale_inzet_uren": totale_inzet_uren,
+                    "opmerking": opmerking, "status": status, "bon_title": bon_title,
                     "ketelmerk": ketelmerk, "onderhoud_waarde": onderhoud_waarde, "type_werkbon": type_werkbon,
                     "stad": stad, "contract": contract, "opbrengst": rij_opbrengst
                 })
         else:
             tijdelijke_registraties.append({
                 "bon_id": bon_id, "bon_number": bon_number, "bon_date": bon_date, "werknemer_naam": "Geen uren geregistreerd",
-                "aantal_uren": voorrijtijd_extra, "opmerking": "", "status": status, "bon_title": bon_title,
+                "aantal_uren": 0.0, "voorrijtijd": voorrijtijd_extra if type_werkbon == "Storing" else 0.0,
+                "totale_inzet_uren": voorrijtijd_extra if type_werkbon == "Storing" else 0.0,
+                "opmerking": "", "status": status, "bon_title": bon_title,
                 "ketelmerk": ketelmerk, "onderhoud_waarde": onderhoud_waarde, "type_werkbon": type_werkbon,
                 "stad": stad, "contract": contract, "opbrengst": 0.0
             })
@@ -345,16 +333,16 @@ def main():
     # STAP 4: Financiën Berekenen
     for item in tijdelijke_registraties:
         naam_klein = item["werknemer_naam"].lower()
-        aantal_uren = item["aantal_uren"]
+        uren_voor_kosten = item["totale_inzet_uren"]
         bon_date = item["bon_date"]
 
         if "sjon" in naam_klein:
             totale_uren_sjon_vandaag = sjon_dag_uren.get(bon_date, 0.0)
-            kosten = round((aantal_uren / totale_uren_sjon_vandaag) * 240.00, 2) if totale_uren_sjon_vandaag > 0 else 0.0
+            kosten = round((uren_voor_kosten / totale_uren_sjon_vandaag) * 240.00, 2) if totale_uren_sjon_vandaag > 0 else 0.0
         elif "ramazan" in naam_klein: kosten = 60.00
-        elif "rik" in naam_klein: kosten = round(aantal_uren * 40.00, 2)
-        elif "mark" in naam_klein or "remco" in naam_klein: kosten = round(aantal_uren * 45.00, 2)
-        else: kosten = round(aantal_uren * 30.00, 2)
+        elif "rik" in naam_klein: kosten = round(uren_voor_kosten * 40.00, 2)
+        elif "mark" in naam_klein or "remco" in naam_klein: kosten = round(uren_voor_kosten * 45.00, 2)
+        else: kosten = round(uren_voor_kosten * 30.00, 2)
 
         marge = round(item["opbrengst"] - kosten, 2)
 
@@ -363,7 +351,7 @@ def main():
             item["bon_number"],        # 2
             item["bon_date"],          # 3
             item["werknemer_naam"],    # 4
-            aantal_uren,               # 5
+            item["aantal_uren"],       # 5 (Puur gemaakte uren)
             item["opmerking"],         # 6
             item["status"],            # 7
             item["bon_title"],         # 8
@@ -374,7 +362,8 @@ def main():
             item["type_werkbon"],      # 13
             item["ketelmerk"],         # 14
             item["stad"],              # 15
-            item["contract"]           # 16
+            item["contract"],          # 16
+            item["voorrijtijd"]        # 17 (NIEUW ACHTERAAN)
         ]
         sleutel = f"{item['bon_id']}_{item['werknemer_naam']}"
         nieuwe_rijen_dict[sleutel] = rij
@@ -385,7 +374,7 @@ def main():
     
     worksheet.clear()
     worksheet.append_rows([headers] + definitieve_rijen)
-    print(f"Succes! Stad (15) en Contract (16) achteraan toegevoegd op basis van de Robaws OpenAPI specificaties. ({len(definitieve_rijen)} rijen opgeslagen).")
+    print(f"Succes! Voorrijtijd losgekoppeld van gemaakte uren en als Kolom 17 achteraan toegevoegd! ({len(definitieve_rijen)} rijen opgeslagen).")
 
 if __name__ == "__main__":
     main()
