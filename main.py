@@ -114,13 +114,12 @@ def main():
     sh = gc.open_by_key(sheet_id)
     worksheet = sh.worksheet(sheet_name)
     
-    # 🎯 17 KOLOMMEN (VOORRIJTIJD GEHEEL ACHTERAAN TOEGEVOEGD)
     headers = [
         "Werkbon ID",           # 1
         "Nummer",               # 2
         "Datum",                # 3
         "Werknemer",            # 4
-        "Uren",                 # 5 (Puur de gemaakte uren uit Robaws!)
+        "Uren",                 # 5
         "Opmerking Werknemer",  # 6
         "Status Werkbon",       # 7
         "Titel / Omschrijving", # 8
@@ -132,7 +131,7 @@ def main():
         "Ketelmerk",            # 14
         "Stad",                 # 15
         "Contract",             # 16
-        "Voorrijtijd (uren)"    # 17 (NIEUW ACHTERAAN)
+        "Voorrijtijd (uren)"    # 17
     ]
     
     bestaande_data = worksheet.get_all_values()
@@ -296,13 +295,8 @@ def main():
                 basis_uren = float(reg.get("hours") or reg.get("duration") or 0.0)
                 opmerking = reg.get("remark") or reg.get("comment") or ""
 
-                # PUUR GEMAAKTE UREN (ZONDER VOORRIJTIJD)
                 aantal_uren = basis_uren
-                
-                # Voorrijtijd op de 1e regel zetten van een storing
                 rij_voorrijtijd = voorrijtijd_extra if (index == 0 and type_werkbon == "Storing") else 0.0
-                
-                # Totale inzettijd voor de kosten/opbrengst berekening
                 totale_inzet_uren = aantal_uren + rij_voorrijtijd
 
                 if type_werkbon == "Storing":
@@ -321,13 +315,21 @@ def main():
                     "stad": stad, "contract": contract, "opbrengst": rij_opbrengst
                 })
         else:
+            # GEEN UREN GEREGISTREERD: BEREKEN NU OOK DE CORREKTE OPBRENGST OVER DE VOORRIJTIJD / HET CONTRACT!
+            totale_inzet_uren = voorrijtijd_extra if type_werkbon == "Storing" else 0.0
+            
+            if type_werkbon == "Storing":
+                rij_opbrengst = bereken_opbrengst_storing(contract, totale_inzet_uren)
+            else:
+                rij_opbrengst = bereken_totale_opbrengst_onderhoud(bon_title)
+
             tijdelijke_registraties.append({
                 "bon_id": bon_id, "bon_number": bon_number, "bon_date": bon_date, "werknemer_naam": "Geen uren geregistreerd",
                 "aantal_uren": 0.0, "voorrijtijd": voorrijtijd_extra if type_werkbon == "Storing" else 0.0,
-                "totale_inzet_uren": voorrijtijd_extra if type_werkbon == "Storing" else 0.0,
+                "totale_inzet_uren": totale_inzet_uren,
                 "opmerking": "", "status": status, "bon_title": bon_title,
                 "ketelmerk": ketelmerk, "onderhoud_waarde": onderhoud_waarde, "type_werkbon": type_werkbon,
-                "stad": stad, "contract": contract, "opbrengst": 0.0
+                "stad": stad, "contract": contract, "opbrengst": rij_opbrengst
             })
 
     # STAP 4: Financiën Berekenen
@@ -351,7 +353,7 @@ def main():
             item["bon_number"],        # 2
             item["bon_date"],          # 3
             item["werknemer_naam"],    # 4
-            item["aantal_uren"],       # 5 (Puur gemaakte uren)
+            item["aantal_uren"],       # 5
             item["opmerking"],         # 6
             item["status"],            # 7
             item["bon_title"],         # 8
@@ -363,7 +365,7 @@ def main():
             item["ketelmerk"],         # 14
             item["stad"],              # 15
             item["contract"],          # 16
-            item["voorrijtijd"]        # 17 (NIEUW ACHTERAAN)
+            item["voorrijtijd"]        # 17
         ]
         sleutel = f"{item['bon_id']}_{item['werknemer_naam']}"
         nieuwe_rijen_dict[sleutel] = rij
@@ -374,7 +376,7 @@ def main():
     
     worksheet.clear()
     worksheet.append_rows([headers] + definitieve_rijen)
-    print(f"Succes! Voorrijtijd losgekoppeld van gemaakte uren en als Kolom 17 achteraan toegevoegd! ({len(definitieve_rijen)} rijen opgeslagen).")
+    print(f"Succes! Opbrengst-logica bij werkbonnen zonder geschreven uren gecorrigeerd. ({len(definitieve_rijen)} rijen opgeslagen).")
 
 if __name__ == "__main__":
     main()
