@@ -83,6 +83,36 @@ def bereken_opbrengst_storing(contract_soort, totale_uren):
     else:
         return round(totale_uren * UURLOON_KLANT, 2)
 
+def vind_stad(bon):
+    """Zoekt de stad op basis van de officiële Robaws OpenAPI specificatie."""
+    if not isinstance(bon, dict):
+        return "Onbekend"
+        
+    # 1. Officiële Robaws locatie: Werkbon -> address object -> city
+    addr = bon.get("address")
+    if isinstance(addr, dict) and addr.get("city"):
+        return str(addr.get("city")).strip().title()
+        
+    # 2. Fallback: Werkbon -> projectAddress -> city
+    p_addr = bon.get("projectAddress")
+    if isinstance(p_addr, dict) and p_addr.get("city"):
+        return str(p_addr.get("city")).strip().title()
+        
+    # 3. Fallback: Klant adres -> city
+    cust = bon.get("client") or bon.get("customer")
+    if isinstance(cust, dict):
+        if cust.get("city"):
+            return str(cust.get("city")).strip().title()
+        c_addr = cust.get("address")
+        if isinstance(c_addr, dict) and c_addr.get("city"):
+            return str(c_addr.get("city")).strip().title()
+            
+    # 4. Fallback: Directe 'city' sleutel
+    if bon.get("city"):
+        return str(bon.get("city")).strip().title()
+
+    return "Onbekend"
+
 def main():
     robaws_key = os.environ.get("ROBAWS_API_KEY")
     robaws_secret = os.environ.get("ROBAWS_SECRET")
@@ -122,7 +152,6 @@ def main():
     bestaande_data = worksheet.get_all_values()
     nieuwe_rijen_dict = {}
     
-    # Oude data slim uitlezen en overzetten
     if bestaande_data:
         oude_headers = bestaande_data[0]
         for i, rij in enumerate(bestaande_data):
@@ -192,7 +221,7 @@ def main():
             for test_id in range(max(1, min_id - 100), max_id + 100):
                 if test_id not in all_found_work_orders:
                     try:
-                        r_single = requests.get(f"https://app.robaws.com/api/v2/work-orders/{test_id}", auth=auth)
+                        r_single = requests.get(f"https://app.robaws.com/api/v2/work-orders/{test_id}?include=address,client", auth=auth)
                         if r_single.status_code == 200:
                             item_single = r_single.json()
                             if isinstance(item_single, dict) and "id" in item_single:
@@ -237,7 +266,6 @@ def main():
             if "gearchiveerd" not in str(status).lower():
                 status = f"{status} (Gearchiveerd)"
 
-        # Extra veld
         extra_fields = bon.get("extraFields", {})
         onderhoud_waarde = ""
         for key, value in extra_fields.items():
@@ -248,15 +276,9 @@ def main():
                     onderhoud_waarde = str(value)
                 break
 
-        # Stad ophalen
-        stad = bon.get("city")
-        if not stad and isinstance(bon.get("projectAddress"), dict):
-            stad = bon.get("projectAddress").get("city")
-        if not stad and isinstance(bon.get("customer"), dict):
-            stad = bon.get("customer").get("city")
-        stad = str(stad).strip().title() if stad else "Onbekend"
+        # Robuust de stad bepalen via de OpenAPI-structuur
+        stad = vind_stad(bon)
 
-        # Eigenschappen bepalen
         ketelmerk = bepaal_ketelmerk(bon_title)
         contract = bepaal_contract_soort(bon_title)
         bon_title_lower = bon_title.lower()
@@ -268,11 +290,16 @@ def main():
         time_entries = []
         try:
             r_detail = requests.get(
-                f"https://app.robaws.com/api/v2/work-orders/{bon_id}?include=timeEntries,timeEntries.employee,hourRegistrations,hourRegistrations.employee,employee",
+                f"https://app.robaws.com/api/v2/work-orders/{bon_id}?include=address,client,projectAddress,timeEntries,timeEntries.employee,hourRegistrations,hourRegistrations.employee,employee",
                 auth=auth
             )
             if r_detail.status_code == 200:
                 d_detail = r_detail.json()
+                
+                # Check of de extra detail-API de stad alsnog kan invullen
+                if stad == "Onbekend":
+                    stad = vind_stad(d_detail)
+                    
                 for k in ["timeEntries", "hourRegistrations", "timeRegistrations", "activities"]:
                     if k in d_detail and isinstance(d_detail[k], list) and len(d_detail[k]) > 0:
                         time_entries = d_detail[k]
@@ -293,11 +320,9 @@ def main():
                 else:
                     aantal_uren = basis_uren
 
-                # Opbrengst bepalen
                 if type_werkbon == "Storing":
                     rij_opbrengst = bereken_opbrengst_storing(contract, aantal_uren)
                 else:
-                    # Alleen opbrengst rekenen op de 1e urenregel van de bon om dubbeltellen in Looker Studio te voorkomen!
                     rij_opbrengst = bereken_totale_opbrengst_onderhoud(bon_title) if index == 0 else 0.0
 
                 if "sjon" in werknemer_naam.lower():
@@ -333,24 +358,23 @@ def main():
 
         marge = round(item["opbrengst"] - kosten, 2)
 
-        # 🎯 STRIKTE BEHOUD VAN OORSPRONKELIJKE INDELING 1 T/M 14 + 15 EN 16 ACHTERAAN
         rij = [
-            item["bon_id"],            # 1. Werkbon ID
-            item["bon_number"],        # 2. Nummer
-            item["bon_date"],          # 3. Datum
-            item["werknemer_naam"],    # 4. Werknemer
-            aantal_uren,               # 5. Uren
-            item["opmerking"],         # 6. Opmerking Werknemer
-            item["status"],            # 7. Status Werkbon
-            item["bon_title"],         # 8. Titel / Omschrijving
-            item["onderhoud_waarde"],  # 9. Onderhoud
-            item["opbrengst"],         # 10. Opbrengst (€)
-            kosten,                    # 11. Kosten (€)
-            marge,                     # 12. Marge (€)
-            item["type_werkbon"],      # 13. Type Werkbon
-            item["ketelmerk"],         # 14. Ketelmerk
-            item["stad"],              # 15. Stad (NIEUW ACHTERAAN)
-            item["contract"]           # 16. Contract (NIEUW ACHTERAAN)
+            item["bon_id"],            # 1
+            item["bon_number"],        # 2
+            item["bon_date"],          # 3
+            item["werknemer_naam"],    # 4
+            aantal_uren,               # 5
+            item["opmerking"],         # 6
+            item["status"],            # 7
+            item["bon_title"],         # 8
+            item["onderhoud_waarde"],  # 9
+            item["opbrengst"],         # 10
+            kosten,                    # 11
+            marge,                     # 12
+            item["type_werkbon"],      # 13
+            item["ketelmerk"],         # 14
+            item["stad"],              # 15
+            item["contract"]           # 16
         ]
         sleutel = f"{item['bon_id']}_{item['werknemer_naam']}"
         nieuwe_rijen_dict[sleutel] = rij
@@ -361,7 +385,7 @@ def main():
     
     worksheet.clear()
     worksheet.append_rows([headers] + definitieve_rijen)
-    print(f"Succes! Oorspronkelijke indeling (1 t/m 14) behouden. Stad (15) en Contract (16) achteraan toegevoegd! ({len(definitieve_rijen)} rijen opgeslagen).")
+    print(f"Succes! Stad (15) en Contract (16) achteraan toegevoegd op basis van de Robaws OpenAPI specificaties. ({len(definitieve_rijen)} rijen opgeslagen).")
 
 if __name__ == "__main__":
     main()
